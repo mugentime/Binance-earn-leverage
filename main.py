@@ -1,18 +1,15 @@
-# main.py
+# main.py - Simplified version
 import os
 import requests
 import hmac
 import hashlib
 import time
 import json
-import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import logging
 from dataclasses import dataclass
 import asyncio
-import aiohttp
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, jsonify, request, render_template_string
 
@@ -43,7 +40,7 @@ class MultiAssetLeverageBot:
     El trading automatizado conlleva riesgos significativos.
     """
     
-    def __init__(self, api_key: str, api_secret: str, testnet: bool = True):
+    def __init__(self, api_key: str = "demo", api_secret: str = "demo", testnet: bool = True):
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = "https://testnet.binance.vision" if testnet else "https://api.binance.com"
@@ -104,37 +101,6 @@ class MultiAssetLeverageBot:
             'OSMO': AssetConfig('OSMO', 0.30, 0.28, 4, 0.050, 0.85),
             'JUNO': AssetConfig('JUNO', 0.25, 0.30, 4, 0.052, 0.9),
         }
-    
-    def _generate_signature(self, query_string: str) -> str:
-        """Genera firma HMAC para autenticación"""
-        return hmac.new(
-            self.api_secret.encode('utf-8'),
-            query_string.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-    
-    async def _make_request(self, endpoint: str, params: Dict = None, method: str = 'GET') -> Dict:
-        """Realiza peticiones asíncronas a la API"""
-        if params is None:
-            params = {}
-        
-        params['timestamp'] = int(time.time() * 1000)
-        query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
-        params['signature'] = self._generate_signature(query_string)
-        
-        url = f"{self.base_url}{endpoint}"
-        
-        async with aiohttp.ClientSession(headers=self.headers) as session:
-            try:
-                if method == 'GET':
-                    async with session.get(url, params=params) as response:
-                        return await response.json()
-                elif method == 'POST':
-                    async with session.post(url, data=params) as response:
-                        return await response.json()
-            except Exception as e:
-                self.logger.error(f"Error en petición API: {e}")
-                return {}
     
     def calculate_cascade_structure(self, initial_capital: float) -> List[Dict]:
         """Calcula estructura de cascada de apalancamiento"""
@@ -480,8 +446,10 @@ def start_bot():
         
         bot = MultiAssetLeverageBot(api_key, api_secret, testnet=True)
         
-        # Iniciar simulación
-        asyncio.create_task(bot.start_simulation(capital))
+        # Iniciar simulación (sincrono para simplificar)
+        import threading
+        thread = threading.Thread(target=lambda: asyncio.run(bot.start_simulation(capital)))
+        thread.start()
         
         return jsonify({'success': True, 'message': 'Bot iniciado exitosamente'})
     except Exception as e:
@@ -518,11 +486,11 @@ def get_status():
 def get_assets():
     global bot
     if bot:
-        return jsonify(bot.asset_config)
+        return jsonify({k: v.__dict__ for k, v in bot.asset_config.items()})
     else:
         # Retornar configuración por defecto
         temp_bot = MultiAssetLeverageBot('demo', 'demo')
-        return jsonify(temp_bot.asset_config)
+        return jsonify({k: v.__dict__ for k, v in temp_bot.asset_config.items()})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
