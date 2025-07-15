@@ -1,4 +1,4 @@
-# main.py - Simplified version
+# live_trading_bot.py - LIVE TRADING VERSION
 import os
 import requests
 import hmac
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, jsonify, request, render_template_string
+import urllib.parse
 
 @dataclass
 class AssetConfig:
@@ -31,467 +32,486 @@ class Position:
     current_ltv: float
     yield_earned: float
     level: int
+    order_id: Optional[str] = None
 
-class MultiAssetLeverageBot:
-    """
-    Bot de Apalancamiento Multi-Activo con Estrategia de Cascada
+class LiveBinanceClient:
+    """Live Binance API client for margin trading"""
     
-    ADVERTENCIA: Este código es para fines educativos.
-    El trading automatizado conlleva riesgos significativos.
-    """
-    
-    def __init__(self, api_key: str = "demo", api_secret: str = "demo", testnet: bool = True):
+    def __init__(self, api_key: str, api_secret: str):
         self.api_key = api_key
         self.api_secret = api_secret
-        self.base_url = "https://testnet.binance.vision" if testnet else "https://api.binance.com"
+        self.base_url = "https://api.binance.com"
         self.headers = {
             'X-MBX-APIKEY': api_key,
             'Content-Type': 'application/json'
         }
         
-        # Configuración de logging
+    def _generate_signature(self, query_string: str) -> str:
+        """Generate signature for authenticated requests"""
+        return hmac.new(
+            self.api_secret.encode('utf-8'),
+            query_string.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+    
+    def _make_request(self, method: str, endpoint: str, params: dict = None, signed: bool = False) -> dict:
+        """Make authenticated request to Binance API"""
+        url = f"{self.base_url}{endpoint}"
+        
+        if params is None:
+            params = {}
+        
+        if signed:
+            params['timestamp'] = int(time.time() * 1000)
+            query_string = urllib.parse.urlencode(params)
+            params['signature'] = self._generate_signature(query_string)
+        
+        try:
+            if method == 'GET':
+                response = requests.get(url, headers=self.headers, params=params, timeout=10)
+            elif method == 'POST':
+                response = requests.post(url, headers=self.headers, params=params, timeout=10)
+            elif method == 'DELETE':
+                response = requests.delete(url, headers=self.headers, params=params, timeout=10)
+            
+            response.raise_for_status()
+            return response.json()
+        
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"API request failed: {e}")
+    
+    def get_account_info(self) -> dict:
+        """Get margin account information"""
+        return self._make_request('GET', '/sapi/v1/margin/account', signed=True)
+    
+    def get_symbol_price(self, symbol: str) -> float:
+        """Get current symbol price"""
+        response = self._make_request('GET', '/api/v3/ticker/price', {'symbol': symbol})
+        return float(response['price'])
+    
+    def create_margin_order(self, symbol: str, side: str, type_: str, quantity: float, 
+                          price: float = None, sideEffectType: str = "MARGIN_BUY") -> dict:
+        """Create margin order"""
+        params = {
+            'symbol': symbol,
+            'side': side,
+            'type': type_,
+            'quantity': quantity,
+            'sideEffectType': sideEffectType
+        }
+        
+        if price:
+            params['price'] = price
+            params['timeInForce'] = 'GTC'
+        
+        return self._make_request('POST', '/sapi/v1/margin/order', params, signed=True)
+    
+    def borrow_margin(self, asset: str, amount: float) -> dict:
+        """Borrow asset on margin"""
+        params = {
+            'asset': asset,
+            'amount': amount
+        }
+        return self._make_request('POST', '/sapi/v1/margin/loan', params, signed=True)
+    
+    def repay_margin(self, asset: str, amount: float) -> dict:
+        """Repay margin loan"""
+        params = {
+            'asset': asset,
+            'amount': amount
+        }
+        return self._make_request('POST', '/sapi/v1/margin/repay', params, signed=True)
+    
+    def get_margin_positions(self) -> List[dict]:
+        """Get all margin positions"""
+        account_info = self.get_account_info()
+        return [asset for asset in account_info['userAssets'] 
+                if float(asset['free']) > 0 or float(asset['locked']) > 0]
+
+class LiveMultiAssetLeverageBot:
+    """
+    LIVE TRADING Multi-Asset Leverage Bot
+    
+    ⚠️ CRITICAL WARNING ⚠️
+    This bot trades with REAL MONEY and LEVERAGE.
+    YOU CAN LOSE MORE THAN YOUR INITIAL INVESTMENT.
+    Use at your own risk. Start with small amounts.
+    """
+    
+    def __init__(self, api_key: str, api_secret: str):
+        if not api_key or not api_secret or api_key == "demo":
+            raise ValueError("LIVE API credentials required. This is not a simulation.")
+        
+        self.client = LiveBinanceClient(api_key, api_secret)
+        
+        # Setup logging with more detail for live trading
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s'
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler('live_trading.log'),
+                logging.StreamHandler()
+            ]
         )
         self.logger = logging.getLogger(__name__)
+        self.logger.info("🔴 LIVE TRADING BOT INITIALIZED - REAL MONEY AT RISK")
         
-        # Configuración de activos multi-tier
-        self.asset_config = self._initialize_asset_config()
+        # Asset configuration (conservative for live trading)
+        self.asset_config = self._initialize_conservative_config()
         
-        # Configuración de estrategia
-        self.max_cascade_levels = 5
-        self.target_total_leverage = 2.4
-        self.rebalance_threshold = 0.05
-        self.emergency_ltv = 0.85
+        # Strategy configuration (more conservative for live)
+        self.max_cascade_levels = 3  # Reduced from 5
+        self.target_total_leverage = 1.8  # Reduced from 2.4
+        self.emergency_ltv = 0.75  # More conservative
+        self.rebalance_threshold = 0.03
         
-        # Estado del portfolio
+        # Portfolio state
         self.positions: List[Position] = []
         self.total_capital = 0
         self.leveraged_capital = 0
         self.total_yield = 0
-        
-        # Control de ejecución
         self.is_running = False
-        self.last_rebalance = datetime.now()
         self.bot_status = "Stopped"
         
-    def _initialize_asset_config(self) -> Dict[str, AssetConfig]:
-        """Inicializa configuración de activos por tiers"""
+        # Safety mechanisms
+        self.max_daily_loss = 0.05  # 5% max daily loss
+        self.circuit_breaker_triggered = False
+        self.last_health_check = datetime.now()
+    
+    def _initialize_conservative_config(self) -> Dict[str, AssetConfig]:
+        """Conservative asset config for live trading"""
         return {
-            # Tier 1 - Alta Liquidez
-            'BTC': AssetConfig('BTC', 0.70, 0.05, 1, 0.025, 0.3),
-            'ETH': AssetConfig('ETH', 0.65, 0.06, 1, 0.028, 0.35),
-            'BNB': AssetConfig('BNB', 0.60, 0.08, 1, 0.030, 0.4),
-            
-            # Tier 2 - Media Liquidez
-            'AVAX': AssetConfig('AVAX', 0.55, 0.12, 2, 0.035, 0.5),
-            'MATIC': AssetConfig('MATIC', 0.50, 0.15, 2, 0.032, 0.45),
-            'SOL': AssetConfig('SOL', 0.52, 0.13, 2, 0.038, 0.55),
-            'ADA': AssetConfig('ADA', 0.48, 0.16, 2, 0.033, 0.42),
-            
-            # Tier 3 - Oportunidades
-            'DOT': AssetConfig('DOT', 0.45, 0.18, 3, 0.040, 0.6),
-            'ATOM': AssetConfig('ATOM', 0.40, 0.20, 3, 0.042, 0.65),
-            'NEAR': AssetConfig('NEAR', 0.42, 0.19, 3, 0.041, 0.58),
-            'FTM': AssetConfig('FTM', 0.38, 0.22, 3, 0.045, 0.7),
-            
-            # Tier 4 - Alto Rendimiento
-            'LUNA': AssetConfig('LUNA', 0.35, 0.25, 4, 0.048, 0.8),
-            'OSMO': AssetConfig('OSMO', 0.30, 0.28, 4, 0.050, 0.85),
-            'JUNO': AssetConfig('JUNO', 0.25, 0.30, 4, 0.052, 0.9),
+            # Only most liquid assets for live trading
+            'BTC': AssetConfig('BTC', 0.50, 0.03, 1, 0.02, 0.25),  # Much more conservative
+            'ETH': AssetConfig('ETH', 0.45, 0.035, 1, 0.022, 0.28),
+            'BNB': AssetConfig('BNB', 0.40, 0.04, 1, 0.025, 0.30),
+            'USDC': AssetConfig('USDC', 0.85, 0.02, 1, 0.015, 0.02),  # Stable coin
         }
     
-    def calculate_cascade_structure(self, initial_capital: float) -> List[Dict]:
-        """Calcula estructura de cascada de apalancamiento"""
-        cascade_levels = []
-        current_capital = initial_capital
+    async def start_live_trading(self, initial_capital: float):
+        """Start live trading with real money"""
+        try:
+            # SAFETY CHECKS
+            if initial_capital > 10000:
+                raise ValueError("Maximum $10,000 for safety. Increase manually if needed.")
+            
+            # Verify API connection
+            account_info = self.client.get_account_info()
+            self.logger.info(f"Connected to Binance account")
+            
+            # Check account has sufficient balance
+            usdt_balance = next((float(asset['free']) for asset in account_info['userAssets'] 
+                               if asset['asset'] == 'USDT'), 0)
+            
+            if usdt_balance < initial_capital:
+                raise ValueError(f"Insufficient USDT balance. Have: ${usdt_balance}, Need: ${initial_capital}")
+            
+            self.total_capital = initial_capital
+            self.is_running = True
+            self.bot_status = "Running (LIVE)"
+            
+            self.logger.critical(f"🔴 STARTING LIVE TRADING WITH ${initial_capital}")
+            
+            # Execute conservative cascade strategy
+            await self._execute_live_cascade_strategy(initial_capital)
+            
+        except Exception as e:
+            self.logger.error(f"LIVE TRADING ERROR: {e}")
+            self.bot_status = "Error"
+            await self.emergency_stop()
+            raise
+    
+    async def _execute_live_cascade_strategy(self, capital: float):
+        """Execute live cascade strategy with real trades"""
+        current_capital = capital
         
-        # Ordenar activos por score (yield/volatility ratio)
+        # Sort assets by safety score (lower volatility preferred for live)
         sorted_assets = sorted(
             self.asset_config.items(),
             key=lambda x: x[1].yield_rate / (1 + x[1].volatility_factor),
             reverse=True
         )
         
-        for level in range(self.max_cascade_levels):
-            if level >= len(sorted_assets) or current_capital < 100:
+        for level in range(min(self.max_cascade_levels, len(sorted_assets))):
+            if current_capital < 100:  # Minimum position size
                 break
             
             asset_name, asset_config = sorted_assets[level]
-            max_loan = current_capital * asset_config.ltv_max
             
-            cascade_levels.append({
-                'level': level + 1,
-                'collateral_asset': asset_name,
-                'collateral_amount': current_capital,
-                'loan_amount': max_loan,
-                'loan_asset': 'USDT',
-                'next_purchase_asset': sorted_assets[(level + 1) % len(sorted_assets)][0],
-                'expected_yield': asset_config.yield_rate,
-                'loan_cost': asset_config.loan_rate,
-                'net_yield': asset_config.yield_rate - asset_config.loan_rate
-            })
-            
-            current_capital = max_loan * 0.95
-        
-        return cascade_levels
-    
-    async def start_simulation(self, initial_capital: float):
-        """Inicia simulación del bot"""
-        try:
-            self.logger.info(f"Iniciando simulación con capital: ${initial_capital}")
-            self.total_capital = initial_capital
-            self.is_running = True
-            self.bot_status = "Running"
-            
-            # Calcular estructura de cascada
-            cascade_structure = self.calculate_cascade_structure(initial_capital)
-            
-            # Simular posiciones
-            total_leveraged = 0
-            for cascade_level in cascade_structure:
-                position = Position(
-                    asset=cascade_level['collateral_asset'],
-                    collateral_amount=cascade_level['collateral_amount'],
-                    loan_amount=cascade_level['loan_amount'],
-                    loan_asset=cascade_level['loan_asset'],
-                    current_ltv=cascade_level['loan_amount'] / cascade_level['collateral_amount'],
-                    yield_earned=0,
-                    level=cascade_level['level']
+            try:
+                # Get current price
+                symbol = f"{asset_name}USDT"
+                current_price = self.client.get_symbol_price(symbol)
+                
+                # Calculate position size (conservative)
+                max_position = current_capital * 0.8  # Only use 80% of available
+                collateral_usd = min(max_position, current_capital)
+                
+                # Buy collateral asset
+                quantity = collateral_usd / current_price
+                
+                self.logger.info(f"Level {level + 1}: Buying {quantity:.6f} {asset_name} at ${current_price}")
+                
+                buy_order = self.client.create_margin_order(
+                    symbol=symbol,
+                    side='BUY',
+                    type_='MARKET',
+                    quantity=quantity,
+                    sideEffectType='MARGIN_BUY'
                 )
+                
+                # Calculate maximum borrowable amount
+                max_loan = collateral_usd * asset_config.ltv_max
+                
+                # Borrow USDT against the collateral
+                self.logger.info(f"Borrowing ${max_loan:.2f} USDT against {asset_name}")
+                
+                borrow_result = self.client.borrow_margin('USDT', max_loan)
+                
+                # Create position record
+                position = Position(
+                    asset=asset_name,
+                    collateral_amount=collateral_usd,
+                    loan_amount=max_loan,
+                    loan_asset='USDT',
+                    current_ltv=max_loan / collateral_usd,
+                    yield_earned=0,
+                    level=level + 1,
+                    order_id=buy_order.get('orderId')
+                )
+                
                 self.positions.append(position)
-                total_leveraged += cascade_level['loan_amount']
+                self.leveraged_capital += max_loan
+                
+                # Update capital for next level
+                current_capital = max_loan * 0.9  # Use 90% of borrowed amount
+                
+                self.logger.info(f"Level {level + 1} completed successfully")
+                
+                # Wait between trades to avoid rate limits
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                self.logger.error(f"Error in level {level + 1}: {e}")
+                break
+        
+        self.logger.critical(f"🔴 LIVE STRATEGY DEPLOYED - {len(self.positions)} positions active")
+    
+    async def monitor_positions(self):
+        """Continuously monitor live positions"""
+        while self.is_running:
+            try:
+                await self._health_check()
+                await self._update_position_ltv()
+                await self._check_emergency_conditions()
+                
+                # Wait 30 seconds between checks
+                await asyncio.sleep(30)
+                
+            except Exception as e:
+                self.logger.error(f"Monitoring error: {e}")
+                await asyncio.sleep(60)  # Wait longer on errors
+    
+    async def _health_check(self):
+        """Perform health check on account"""
+        try:
+            account_info = self.client.get_account_info()
+            margin_level = float(account_info['marginLevel'])
             
-            self.leveraged_capital = total_leveraged
+            self.logger.info(f"Health check - Margin level: {margin_level}")
             
-            # Calcular rendimiento estimado
-            annual_yield = sum((l['net_yield']) * l['loan_amount'] for l in cascade_structure)
-            self.total_yield = (annual_yield / initial_capital) * 100
+            if margin_level < 1.5:  # Approaching margin call
+                self.logger.warning(f"⚠️ LOW MARGIN LEVEL: {margin_level}")
+                await self._reduce_positions()
             
-            self.logger.info(f"Simulación iniciada exitosamente")
-            
+            if margin_level < 1.2:  # Critical
+                self.logger.critical(f"🔴 CRITICAL MARGIN LEVEL: {margin_level}")
+                await self.emergency_stop()
+                
         except Exception as e:
-            self.logger.error(f"Error en simulación: {e}")
-            self.bot_status = "Error"
+            self.logger.error(f"Health check failed: {e}")
+    
+    async def _update_position_ltv(self):
+        """Update LTV ratios for all positions"""
+        for position in self.positions:
+            try:
+                symbol = f"{position.asset}USDT"
+                current_price = self.client.get_symbol_price(symbol)
+                current_value = (position.collateral_amount / current_price) * current_price
+                position.current_ltv = position.loan_amount / current_value
+                
+                if position.current_ltv > self.emergency_ltv:
+                    self.logger.warning(f"⚠️ High LTV on {position.asset}: {position.current_ltv:.3f}")
+                    
+            except Exception as e:
+                self.logger.error(f"Failed to update LTV for {position.asset}: {e}")
+    
+    async def _check_emergency_conditions(self):
+        """Check for emergency stop conditions"""
+        # Check if any position has dangerous LTV
+        dangerous_positions = [p for p in self.positions if p.current_ltv > self.emergency_ltv]
+        
+        if dangerous_positions:
+            self.logger.critical(f"🔴 EMERGENCY: {len(dangerous_positions)} positions over safety limit")
+            await self.emergency_stop()
+    
+    async def _reduce_positions(self):
+        """Reduce position sizes to improve margin"""
+        self.logger.info("Reducing positions to improve margin safety")
+        
+        # Sort positions by risk (highest LTV first)
+        risky_positions = sorted(self.positions, key=lambda p: p.current_ltv, reverse=True)
+        
+        for position in risky_positions[:2]:  # Reduce top 2 riskiest
+            try:
+                # Repay 25% of loan
+                repay_amount = position.loan_amount * 0.25
+                
+                self.client.repay_margin('USDT', repay_amount)
+                position.loan_amount -= repay_amount
+                position.current_ltv = position.loan_amount / position.collateral_amount
+                
+                self.logger.info(f"Reduced {position.asset} loan by ${repay_amount:.2f}")
+                
+            except Exception as e:
+                self.logger.error(f"Failed to reduce position {position.asset}: {e}")
+    
+    async def emergency_stop(self):
+        """Emergency stop all trading"""
+        self.logger.critical("🔴 EMERGENCY STOP ACTIVATED")
+        self.is_running = False
+        self.bot_status = "Emergency Stop"
+        self.circuit_breaker_triggered = True
+        
+        # Close all positions
+        for position in self.positions:
+            try:
+                # Repay loan
+                self.client.repay_margin('USDT', position.loan_amount)
+                
+                # Sell collateral
+                symbol = f"{position.asset}USDT"
+                current_price = self.client.get_symbol_price(symbol)
+                quantity = position.collateral_amount / current_price
+                
+                self.client.create_margin_order(
+                    symbol=symbol,
+                    side='SELL',
+                    type_='MARKET',
+                    quantity=quantity,
+                    sideEffectType='AUTO_REPAY'
+                )
+                
+                self.logger.info(f"Emergency closed position: {position.asset}")
+                
+            except Exception as e:
+                self.logger.error(f"Failed to emergency close {position.asset}: {e}")
+        
+        self.positions.clear()
     
     def stop_bot(self):
-        """Detiene el bot"""
+        """Gracefully stop the bot"""
+        self.logger.info("Stopping bot gracefully...")
         self.is_running = False
-        self.bot_status = "Stopped"
-        self.positions.clear()
-        self.logger.info("Bot detenido")
+        self.bot_status = "Stopping"
+        
+        # This should trigger position closure in the main loop
     
     def get_portfolio_status(self) -> Dict:
-        """Obtiene estado actual del portfolio"""
-        return {
-            'bot_status': self.bot_status,
-            'total_positions': len(self.positions),
-            'total_capital': self.total_capital,
-            'leveraged_capital': self.leveraged_capital,
-            'total_yield': self.total_yield,
-            'leverage_ratio': self.leveraged_capital / self.total_capital if self.total_capital > 0 else 0,
-            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'positions': [
-                {
-                    'asset': pos.asset,
-                    'collateral': pos.collateral_amount,
-                    'loan': pos.loan_amount,
-                    'ltv': pos.current_ltv,
-                    'level': pos.level
-                }
-                for pos in self.positions
-            ]
-        }
+        """Get current portfolio status"""
+        try:
+            account_info = self.client.get_account_info()
+            total_asset_btc = float(account_info['totalAssetOfBtc'])
+            margin_level = float(account_info['marginLevel'])
+            
+            return {
+                'bot_status': self.bot_status,
+                'total_positions': len(self.positions),
+                'total_capital': self.total_capital,
+                'leveraged_capital': self.leveraged_capital,
+                'margin_level': margin_level,
+                'total_asset_btc': total_asset_btc,
+                'leverage_ratio': self.leveraged_capital / self.total_capital if self.total_capital > 0 else 0,
+                'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'circuit_breaker': self.circuit_breaker_triggered,
+                'positions': [
+                    {
+                        'asset': pos.asset,
+                        'collateral': pos.collateral_amount,
+                        'loan': pos.loan_amount,
+                        'ltv': pos.current_ltv,
+                        'level': pos.level,
+                        'order_id': pos.order_id
+                    }
+                    for pos in self.positions
+                ]
+            }
+        except Exception as e:
+            self.logger.error(f"Failed to get portfolio status: {e}")
+            return {'error': str(e)}
 
-# Crear instancia global del bot
-bot = None
-
-# Flask App
+# Flask app for live trading
 app = Flask(__name__)
+live_bot = None
 
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Multi-Asset Leverage Bot</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-        .header { text-align: center; color: #333; margin-bottom: 30px; }
-        .controls { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-        .status { display: flex; justify-content: space-between; margin-bottom: 20px; }
-        .metric { background: #007bff; color: white; padding: 15px; border-radius: 8px; text-align: center; flex: 1; margin: 0 5px; }
-        .metric.yield { background: #28a745; }
-        .metric.leverage { background: #ffc107; color: #333; }
-        .metric.positions { background: #17a2b8; }
-        .positions-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        .positions-table th, .positions-table td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-        .positions-table th { background: #f8f9fa; }
-        .btn { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
-        .btn-primary { background: #007bff; color: white; }
-        .btn-danger { background: #dc3545; color: white; }
-        .btn-success { background: #28a745; color: white; }
-        .input-group { margin: 10px 0; }
-        .input-group label { display: block; margin-bottom: 5px; }
-        .input-group input { width: 200px; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
-        .status-indicator { padding: 5px 10px; border-radius: 20px; color: white; font-weight: bold; }
-        .status-running { background: #28a745; }
-        .status-stopped { background: #dc3545; }
-        .status-error { background: #ffc107; color: #333; }
-        .asset-config { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin: 20px 0; }
-        .asset-card { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #007bff; }
-        .tier-1 { border-left-color: #28a745; }
-        .tier-2 { border-left-color: #ffc107; }
-        .tier-3 { border-left-color: #fd7e14; }
-        .tier-4 { border-left-color: #dc3545; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🚀 Multi-Asset Leverage Bot</h1>
-            <p>Estrategia de Apalancamiento en Cascada Multi-Activo</p>
-        </div>
-        
-        <div class="controls">
-            <h3>Control del Bot</h3>
-            <div class="input-group">
-                <label for="capital">Capital Inicial (USD):</label>
-                <input type="number" id="capital" value="10000" min="100" step="100">
-            </div>
-            <button class="btn btn-success" onclick="startBot()">Iniciar Bot</button>
-            <button class="btn btn-danger" onclick="stopBot()">Detener Bot</button>
-            <button class="btn btn-primary" onclick="updateStatus()">Actualizar Estado</button>
-        </div>
-        
-        <div class="status" id="status">
-            <div class="metric">
-                <div>Estado</div>
-                <div><span id="bot-status" class="status-indicator status-stopped">Detenido</span></div>
-            </div>
-            <div class="metric">
-                <div>Capital Total</div>
-                <div>$<span id="total-capital">0</span></div>
-            </div>
-            <div class="metric leverage">
-                <div>Capital Apalancado</div>
-                <div>$<span id="leveraged-capital">0</span></div>
-            </div>
-            <div class="metric yield">
-                <div>ROI Estimado</div>
-                <div><span id="total-yield">0</span>%</div>
-            </div>
-            <div class="metric positions">
-                <div>Posiciones Activas</div>
-                <div><span id="total-positions">0</span></div>
-            </div>
-        </div>
-        
-        <div>
-            <h3>Configuración de Activos</h3>
-            <div class="asset-config" id="asset-config"></div>
-        </div>
-        
-        <div>
-            <h3>Posiciones Activas</h3>
-            <table class="positions-table" id="positions-table">
-                <thead>
-                    <tr>
-                        <th>Nivel</th>
-                        <th>Activo</th>
-                        <th>Colateral</th>
-                        <th>Préstamo</th>
-                        <th>LTV</th>
-                        <th>Estado</th>
-                    </tr>
-                </thead>
-                <tbody id="positions-body">
-                    <tr>
-                        <td colspan="6" style="text-align: center; color: #666;">No hay posiciones activas</td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-        
-        <div style="margin-top: 30px; padding: 20px; background: #fff3cd; border-radius: 8px; border-left: 4px solid #ffc107;">
-            <h4>⚠️ Advertencia Importante</h4>
-            <p>Este bot está en modo simulación para fines educativos. El trading con apalancamiento conlleva riesgos significativos. Siempre pruebe en testnet antes de usar capital real.</p>
-        </div>
-    </div>
-
-    <script>
-        async function startBot() {
-            const capital = document.getElementById('capital').value;
-            try {
-                const response = await fetch('/start', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ capital: parseFloat(capital) })
-                });
-                const result = await response.json();
-                if (result.success) {
-                    setTimeout(updateStatus, 1000);
-                }
-            } catch (error) {
-                console.error('Error:', error);
-            }
-        }
-        
-        async function stopBot() {
-            try {
-                const response = await fetch('/stop', { method: 'POST' });
-                const result = await response.json();
-                if (result.success) {
-                    setTimeout(updateStatus, 1000);
-                }
-            } catch (error) {
-                console.error('Error:', error);
-            }
-        }
-        
-        async function updateStatus() {
-            try {
-                const response = await fetch('/status');
-                const data = await response.json();
-                
-                // Actualizar métricas
-                document.getElementById('total-capital').textContent = data.total_capital.toLocaleString();
-                document.getElementById('leveraged-capital').textContent = data.leveraged_capital.toLocaleString();
-                document.getElementById('total-yield').textContent = data.total_yield.toFixed(2);
-                document.getElementById('total-positions').textContent = data.total_positions;
-                
-                // Actualizar estado del bot
-                const statusElement = document.getElementById('bot-status');
-                statusElement.textContent = data.bot_status;
-                statusElement.className = 'status-indicator status-' + data.bot_status.toLowerCase();
-                
-                // Actualizar tabla de posiciones
-                const tbody = document.getElementById('positions-body');
-                tbody.innerHTML = '';
-                
-                if (data.positions.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #666;">No hay posiciones activas</td></tr>';
-                } else {
-                    data.positions.forEach(pos => {
-                        const row = document.createElement('tr');
-                        row.innerHTML = `
-                            <td>${pos.level}</td>
-                            <td>${pos.asset}</td>
-                            <td>$${pos.collateral.toLocaleString()}</td>
-                            <td>$${pos.loan.toLocaleString()}</td>
-                            <td>${(pos.ltv * 100).toFixed(1)}%</td>
-                            <td><span class="status-indicator status-running">Activa</span></td>
-                        `;
-                        tbody.appendChild(row);
-                    });
-                }
-            } catch (error) {
-                console.error('Error:', error);
-            }
-        }
-        
-        async function loadAssetConfig() {
-            try {
-                const response = await fetch('/assets');
-                const assets = await response.json();
-                const container = document.getElementById('asset-config');
-                container.innerHTML = '';
-                
-                Object.entries(assets).forEach(([asset, config]) => {
-                    const card = document.createElement('div');
-                    card.className = `asset-card tier-${config.liquidity_tier}`;
-                    card.innerHTML = `
-                        <h4>${asset}</h4>
-                        <p><strong>LTV Máximo:</strong> ${(config.ltv_max * 100).toFixed(0)}%</p>
-                        <p><strong>Yield:</strong> ${(config.yield_rate * 100).toFixed(1)}%</p>
-                        <p><strong>Costo Préstamo:</strong> ${(config.loan_rate * 100).toFixed(1)}%</p>
-                        <p><strong>Ganancia Neta:</strong> ${((config.yield_rate - config.loan_rate) * 100).toFixed(1)}%</p>
-                        <p><strong>Tier:</strong> ${config.liquidity_tier}</p>
-                    `;
-                    container.appendChild(card);
-                });
-            } catch (error) {
-                console.error('Error:', error);
-            }
-        }
-        
-        // Actualizar cada 10 segundos
-        setInterval(updateStatus, 10000);
-        
-        // Cargar configuración inicial
-        loadAssetConfig();
-        updateStatus();
-    </script>
-</body>
-</html>
-'''
-
-@app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE)
-
-@app.route('/start', methods=['POST'])
-def start_bot():
-    global bot
+@app.route('/start_live', methods=['POST'])
+def start_live_trading():
+    global live_bot
     try:
         data = request.get_json()
-        capital = data.get('capital', 10000)
+        capital = data.get('capital', 1000)  # Default smaller for safety
         
-        # Crear nueva instancia del bot
-        api_key = os.getenv('BINANCE_API_KEY', 'demo_key')
-        api_secret = os.getenv('BINANCE_API_SECRET', 'demo_secret')
+        # Get real API credentials from environment
+        api_key = os.getenv('BINANCE_API_KEY')
+        api_secret = os.getenv('BINANCE_API_SECRET')
         
-        bot = MultiAssetLeverageBot(api_key, api_secret, testnet=True)
+        if not api_key or not api_secret:
+            return jsonify({
+                'success': False, 
+                'error': 'BINANCE_API_KEY and BINANCE_API_SECRET environment variables required'
+            })
         
-        # Iniciar simulación (sincrono para simplificar)
+        # Create live bot instance
+        live_bot = LiveMultiAssetLeverageBot(api_key, api_secret)
+        
+        # Start trading in background thread
         import threading
-        thread = threading.Thread(target=lambda: asyncio.run(bot.start_simulation(capital)))
+        def run_live_trading():
+            asyncio.run(live_bot.start_live_trading(capital))
+            # Start monitoring
+            asyncio.run(live_bot.monitor_positions())
+        
+        thread = threading.Thread(target=run_live_trading)
+        thread.daemon = True
         thread.start()
         
-        return jsonify({'success': True, 'message': 'Bot iniciado exitosamente'})
+        return jsonify({'success': True, 'message': f'🔴 LIVE TRADING STARTED with ${capital}'})
+        
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
-@app.route('/stop', methods=['POST'])
-def stop_bot():
-    global bot
+@app.route('/emergency_stop', methods=['POST'])
+def emergency_stop():
+    global live_bot
     try:
-        if bot:
-            bot.stop_bot()
-        return jsonify({'success': True, 'message': 'Bot detenido exitosamente'})
+        if live_bot:
+            asyncio.run(live_bot.emergency_stop())
+        return jsonify({'success': True, 'message': 'Emergency stop executed'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
-@app.route('/status')
-def get_status():
-    global bot
-    if bot:
-        return jsonify(bot.get_portfolio_status())
+@app.route('/live_status')
+def live_status():
+    global live_bot
+    if live_bot:
+        return jsonify(live_bot.get_portfolio_status())
     else:
-        return jsonify({
-            'bot_status': 'Stopped',
-            'total_positions': 0,
-            'total_capital': 0,
-            'leveraged_capital': 0,
-            'total_yield': 0,
-            'leverage_ratio': 0,
-            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'positions': []
-        })
-
-@app.route('/assets')
-def get_assets():
-    global bot
-    if bot:
-        return jsonify({k: v.__dict__ for k, v in bot.asset_config.items()})
-    else:
-        # Retornar configuración por defecto
-        temp_bot = MultiAssetLeverageBot('demo', 'demo')
-        return jsonify({k: v.__dict__ for k, v in temp_bot.asset_config.items()})
+        return jsonify({'error': 'No live bot running'})
 
 if __name__ == '__main__':
+    print("🔴 LIVE TRADING BOT - REAL MONEY AT RISK")
+    print("Set BINANCE_API_KEY and BINANCE_API_SECRET environment variables")
+    print("Use /start_live endpoint to begin trading")
+    
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
