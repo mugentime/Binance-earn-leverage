@@ -33,25 +33,15 @@ class Position:
     level: int
     order_id: str = None
 
-@dataclass
-class EarnPair:
-    collateral_asset: str
-    borrow_asset: str
-    collateral_rate: float
-    borrow_rate: float
-    net_rate: float
-    ltv_ratio: float
-    profit_potential: float
-    risk_score: float
-
 class BinanceAPI:
-    """Complete Binance API integration for real trading"""
+    """Diagnostic Binance API with detailed error reporting"""
     
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = "https://testnet.binance.vision" if testnet else "https://api.binance.com"
         self.headers = {'X-MBX-APIKEY': api_key}
+        self.logger = logging.getLogger(__name__)
         
     def _generate_signature(self, query_string: str) -> str:
         return hmac.new(
@@ -64,139 +54,120 @@ class BinanceAPI:
         if params is None:
             params = {}
         
-        # Fix timestamp generation
         params['timestamp'] = int(time.time() * 1000)
         query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
         params['signature'] = self._generate_signature(query_string)
         
         try:
-            if method == 'GET':
-                response = requests.get(f"{self.base_url}{endpoint}", params=params, headers=self.headers, timeout=10)
-            elif method == 'POST':
-                response = requests.post(f"{self.base_url}{endpoint}", params=params, headers=self.headers, timeout=10)
-            elif method == 'DELETE':
-                response = requests.delete(f"{self.base_url}{endpoint}", params=params, headers=self.headers, timeout=10)
+            self.logger.info(f"Making {method} request to {endpoint}")
             
-            response.raise_for_status()
-            return response.json()
+            if method == 'GET':
+                response = requests.get(f"{self.base_url}{endpoint}", params=params, headers=self.headers, timeout=15)
+            elif method == 'POST':
+                response = requests.post(f"{self.base_url}{endpoint}", params=params, headers=self.headers, timeout=15)
+            elif method == 'DELETE':
+                response = requests.delete(f"{self.base_url}{endpoint}", params=params, headers=self.headers, timeout=15)
+            
+            self.logger.info(f"Response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                self.logger.info(f"Request successful: {endpoint}")
+                return result
+            else:
+                self.logger.error(f"API Error {response.status_code}: {response.text}")
+                return {"error": f"HTTP {response.status_code}", "message": response.text}
+                
+        except requests.exceptions.Timeout:
+            self.logger.error(f"Timeout error for {endpoint}")
+            return {"error": "timeout", "message": "Request timed out"}
+        except requests.exceptions.ConnectionError:
+            self.logger.error(f"Connection error for {endpoint}")
+            return {"error": "connection", "message": "Connection failed"}
         except Exception as e:
-            logging.error(f"API request failed: {e}")
-            if hasattr(e, 'response') and e.response:
-                logging.error(f"Response: {e.response.text}")
-            return {}
+            self.logger.error(f"Unexpected error for {endpoint}: {str(e)}")
+            return {"error": "unknown", "message": str(e)}
+    
+    def test_connection(self) -> Dict:
+        """Test basic API connectivity"""
+        self.logger.info("Testing API connectivity...")
+        return self._make_request("/api/v3/ping")
+    
+    def test_server_time(self) -> Dict:
+        """Test server time endpoint"""
+        self.logger.info("Testing server time...")
+        return self._make_request("/api/v3/time")
     
     def get_account_info(self) -> Dict:
+        """Get account information with detailed logging"""
+        self.logger.info("Getting account info...")
         return self._make_request("/api/v3/account")
     
     def get_symbol_price(self, symbol: str) -> Dict:
+        """Get single symbol price"""
+        self.logger.info(f"Getting price for {symbol}...")
         return self._make_request("/api/v3/ticker/price", {"symbol": symbol})
     
     def get_all_prices(self) -> List[Dict]:
-        return self._make_request("/api/v3/ticker/price")
+        """Get all prices with error handling"""
+        self.logger.info("Getting all prices...")
+        result = self._make_request("/api/v3/ticker/price")
+        if isinstance(result, list):
+            return result
+        else:
+            self.logger.error(f"Expected list, got: {type(result)}")
+            return []
     
     def get_exchange_info(self) -> Dict:
         return self._make_request("/api/v3/exchangeInfo")
     
-    def place_order(self, symbol: str, side: str, order_type: str, quantity: float, 
-                   price: float = None, **kwargs) -> Dict:
-        params = {
-            'symbol': symbol,
-            'side': side,
-            'type': order_type,
-            'quantity': quantity
-        }
-        if price:
-            params['price'] = price
-        params.update(kwargs)
-        return self._make_request("/api/v3/order", params, method='POST')
-    
-    def get_order_status(self, symbol: str, order_id: str) -> Dict:
-        return self._make_request("/api/v3/order", {
-            'symbol': symbol,
-            'orderId': order_id
-        })
-    
-    def cancel_order(self, symbol: str, order_id: str) -> Dict:
-        return self._make_request("/api/v3/order", {
-            'symbol': symbol,
-            'orderId': order_id
-        }, method='DELETE')
-    
-    # Margin Trading
     def get_margin_account(self) -> Dict:
+        self.logger.info("Getting margin account...")
         return self._make_request("/sapi/v1/margin/account")
     
-    def margin_borrow(self, asset: str, amount: float) -> Dict:
-        return self._make_request("/sapi/v1/margin/loan", {
-            'asset': asset,
-            'amount': amount
-        }, method='POST')
-    
-    def margin_repay(self, asset: str, amount: float) -> Dict:
-        return self._make_request("/sapi/v1/margin/repay", {
-            'asset': asset,
-            'amount': amount
-        }, method='POST')
-    
-    def transfer_to_margin(self, asset: str, amount: float) -> Dict:
-        return self._make_request("/sapi/v1/margin/transfer", {
-            'asset': asset,
-            'amount': amount,
-            'type': 1  # MAIN_MARGIN
-        }, method='POST')
-    
-    def transfer_from_margin(self, asset: str, amount: float) -> Dict:
-        return self._make_request("/sapi/v1/margin/transfer", {
-            'asset': asset,
-            'amount': amount,
-            'type': 2  # MARGIN_MAIN
-        }, method='POST')
-    
-    # Savings/Earn
     def get_flexible_products(self) -> List[Dict]:
-        return self._make_request("/sapi/v1/lending/daily/product/list", {
-            'status': 'PURCHASING'
-        })
-    
-    def purchase_flexible_product(self, product_id: str, amount: float) -> Dict:
-        return self._make_request("/sapi/v1/lending/daily/purchase", {
-            'productId': product_id,
-            'amount': amount
-        }, method='POST')
-    
-    def redeem_flexible_product(self, product_id: str, amount: float) -> Dict:
-        return self._make_request("/sapi/v1/lending/daily/redeem", {
-            'productId': product_id,
-            'amount': amount,
-            'type': 'FAST'
-        }, method='POST')
+        self.logger.info("Getting flexible products...")
+        result = self._make_request("/sapi/v1/lending/daily/product/list", {"status": "PURCHASING"})
+        if isinstance(result, list):
+            return result
+        else:
+            return []
     
     def get_flexible_positions(self) -> List[Dict]:
-        return self._make_request("/sapi/v1/lending/daily/token/position")
+        self.logger.info("Getting flexible positions...")
+        result = self._make_request("/sapi/v1/lending/daily/token/position")
+        if isinstance(result, list):
+            return result
+        else:
+            return []
 
 class MultiAssetLeverageBot:
-    """Real Multi-Asset Leverage Bot with Binance Integration"""
+    """Diagnostic version with extensive API testing"""
     
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = testnet
         
-        # Initialize Binance API
-        self.binance_api = BinanceAPI(api_key, api_secret, testnet)
-        
-        # Logging setup
+        # Enhanced logging
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         self.logger = logging.getLogger(__name__)
         
-        # Asset configuration
-        self.asset_config = self._initialize_asset_config()
+        # Initialize API
+        self.binance_api = BinanceAPI(api_key, api_secret, testnet)
         
-        # Strategy configuration
-        self.max_cascade_levels = 5
-        self.target_total_leverage = 2.4
-        self.rebalance_threshold = 0.05
-        self.emergency_ltv = 0.85
+        # API Status tracking
+        self.api_status = {
+            "connection": "unknown",
+            "authentication": "unknown",
+            "account_access": "unknown",
+            "margin_access": "unknown",
+            "savings_access": "unknown",
+            "last_test": None
+        }
+        
+        # Asset configuration - simplified for testing
+        self.asset_config = self._initialize_asset_config()
         
         # Portfolio state
         self.positions: List[Position] = []
@@ -206,551 +177,274 @@ class MultiAssetLeverageBot:
         
         # Control state
         self.is_running = False
-        self.last_rebalance = datetime.now()
         self.bot_status = "Stopped"
         
-        # Market data cache
+        # Cache
         self.price_cache = {}
-        self.flexible_products_cache = {}
         self.account_cache = {}
-        self.last_cache_update = datetime.now() - timedelta(hours=1)
         
-        # Real-time monitoring
-        self._start_monitoring_thread()
+        # Run initial API tests
+        self._test_api_connectivity()
     
     def _initialize_asset_config(self) -> Dict[str, AssetConfig]:
-        """Initialize asset configuration with VALID Binance symbols only"""
-        base_config = {
-            # Tier 1 - Blue Chip Assets (Verified symbols)
+        """Minimal asset config for testing"""
+        return {
             'BTC': AssetConfig('BTC', 0.75, 0.04, 1, 0.022, 0.25),
             'ETH': AssetConfig('ETH', 0.70, 0.05, 1, 0.025, 0.30),
             'BNB': AssetConfig('BNB', 0.65, 0.07, 1, 0.028, 0.35),
             'USDT': AssetConfig('USDT', 0.85, 0.08, 1, 0.020, 0.10),
             'USDC': AssetConfig('USDC', 0.85, 0.075, 1, 0.021, 0.10),
-            
-            # Tier 2 - Established Alts (Verified symbols)
-            'ADA': AssetConfig('ADA', 0.55, 0.12, 2, 0.035, 0.50),
-            'DOT': AssetConfig('DOT', 0.50, 0.14, 2, 0.038, 0.55),
-            'LINK': AssetConfig('LINK', 0.45, 0.16, 2, 0.040, 0.60),
-            'MATIC': AssetConfig('MATIC', 0.40, 0.18, 2, 0.042, 0.65),
-            
-            # Tier 3 - Mid-Cap (Verified symbols)
-            'ATOM': AssetConfig('ATOM', 0.45, 0.15, 3, 0.039, 0.58),
-            'LTC': AssetConfig('LTC', 0.42, 0.17, 3, 0.041, 0.62),
-            'UNI': AssetConfig('UNI', 0.40, 0.19, 3, 0.043, 0.65),
-            'SOL': AssetConfig('SOL', 0.38, 0.21, 3, 0.045, 0.68),
-            'AVAX': AssetConfig('AVAX', 0.35, 0.22, 3, 0.046, 0.70),
-            'NEAR': AssetConfig('NEAR', 0.33, 0.24, 3, 0.048, 0.72),
-            'FTM': AssetConfig('FTM', 0.30, 0.26, 3, 0.050, 0.75),
-            'ALGO': AssetConfig('ALGO', 0.32, 0.25, 3, 0.049, 0.73),
-            'XTZ': AssetConfig('XTZ', 0.35, 0.23, 3, 0.047, 0.69),
-            
-            # Tier 4 - Higher Risk (Verified symbols)
-            'DOGE': AssetConfig('DOGE', 0.30, 0.28, 4, 0.052, 0.80),
-            'SHIB': AssetConfig('SHIB', 0.25, 0.32, 4, 0.058, 0.90),
-            'LRC': AssetConfig('LRC', 0.28, 0.30, 4, 0.055, 0.85),
-            'CRV': AssetConfig('CRV', 0.35, 0.27, 4, 0.051, 0.78),
-            'SUSHI': AssetConfig('SUSHI', 0.22, 0.35, 4, 0.062, 0.95),
-            'COMP': AssetConfig('COMP', 0.25, 0.33, 4, 0.060, 0.88),
         }
+    
+    def _test_api_connectivity(self):
+        """Comprehensive API connectivity test"""
+        self.logger.info("=== STARTING API CONNECTIVITY TESTS ===")
         
-        # Update with real rates from Binance
-        self._update_rates_from_binance(base_config)
-        return base_config
-    
-    def _update_rates_from_binance(self, config: Dict[str, AssetConfig]):
-        """Update asset configuration with real Binance rates"""
-        try:
-            # Get flexible products for earn rates
-            flexible_products = self.binance_api.get_flexible_products()
-            
-            if flexible_products:
-                for product in flexible_products:
-                    asset = product.get('asset', '')
-                    if asset in config:
-                        yield_rate = float(product.get('avgAnnualInterestRate', 0)) / 100
-                        if yield_rate > 0:
-                            config[asset].yield_rate = yield_rate
-                        
-                        # Cache product for later use
-                        self.flexible_products_cache[asset] = product
-            
-            # Get margin account info for borrowing rates
-            margin_account = self.binance_api.get_margin_account()
-            
-            if margin_account and 'userAssets' in margin_account:
-                for asset_info in margin_account['userAssets']:
-                    asset = asset_info.get('asset', '')
-                    if asset in config:
-                        # Update based on current margin rates (simplified calculation)
-                        borrowed = float(asset_info.get('borrowed', 0))
-                        interest = float(asset_info.get('interest', 0))
-                        if borrowed > 0 and interest > 0:
-                            daily_rate = interest / borrowed
-                            annual_rate = daily_rate * 365
-                            config[asset].loan_rate = min(annual_rate, 0.5)  # Cap at 50%
-                            
-        except Exception as e:
-            self.logger.error(f"Error updating rates from Binance: {e}")
-    
-    def _start_monitoring_thread(self):
-        """Start background monitoring thread"""
-        def monitor():
-            while True:
-                try:
-                    if self.is_running:
-                        self._update_cache()
-                        self._monitor_positions()
-                        self._check_rebalance_needed()
-                    time.sleep(30)  # Check every 30 seconds
-                except Exception as e:
-                    self.logger.error(f"Error in monitoring thread: {e}")
-                    time.sleep(60)
+        # Test 1: Basic ping
+        ping_result = self.binance_api.test_connection()
+        if "error" not in ping_result:
+            self.api_status["connection"] = "success"
+            self.logger.info("✅ API Connection: SUCCESS")
+        else:
+            self.api_status["connection"] = f"failed: {ping_result.get('message', 'unknown')}"
+            self.logger.error("❌ API Connection: FAILED")
+            return
         
-        thread = threading.Thread(target=monitor, daemon=True)
-        thread.start()
-    
-    def _update_cache(self):
-        """Update market data cache"""
-        try:
-            # Update prices - only for valid symbols
+        # Test 2: Server time
+        time_result = self.binance_api.test_server_time()
+        if "serverTime" in time_result:
+            self.logger.info("✅ Server Time: SUCCESS")
+        else:
+            self.logger.error("❌ Server Time: FAILED")
+        
+        # Test 3: Account info (tests authentication)
+        account_result = self.binance_api.get_account_info()
+        if "balances" in account_result:
+            self.api_status["authentication"] = "success"
+            self.api_status["account_access"] = "success"
+            self.logger.info("✅ Account Access: SUCCESS")
+            self.account_cache = account_result
+        else:
+            self.api_status["authentication"] = f"failed: {account_result.get('message', 'unknown')}"
+            self.logger.error("❌ Account Access: FAILED")
+            self.logger.error(f"Error details: {account_result}")
+        
+        # Test 4: Price data
+        btc_price = self.binance_api.get_symbol_price("BTCUSDT")
+        if "price" in btc_price:
+            self.logger.info(f"✅ Price Data: SUCCESS (BTC: ${btc_price['price']})")
+            # Get all prices
             all_prices = self.binance_api.get_all_prices()
             if all_prices:
                 self.price_cache = {p['symbol']: float(p['price']) for p in all_prices}
-            
-            # Update account info
-            account_info = self.binance_api.get_account_info()
-            if account_info:
-                self.account_cache = account_info
-            
-            self.last_cache_update = datetime.now()
-            
-        except Exception as e:
-            self.logger.error(f"Error updating cache: {e}")
-    
-    def _monitor_positions(self):
-        """Monitor active positions for risk management"""
-        try:
-            for position in self.positions:
-                # Get current prices
-                collateral_price = self._get_asset_price(position.asset)
-                loan_asset_price = self._get_asset_price(position.loan_asset)
-                
-                if collateral_price > 0 and loan_asset_price > 0:
-                    # Calculate current LTV
-                    collateral_value = position.collateral_amount * collateral_price
-                    loan_value = position.loan_amount * loan_asset_price
-                    current_ltv = loan_value / collateral_value
-                    
-                    position.current_ltv = current_ltv
-                    
-                    # Risk management
-                    asset_config = self.asset_config[position.asset]
-                    
-                    if current_ltv > asset_config.ltv_max * 0.9:  # 90% of max LTV
-                        self.logger.warning(f"High LTV warning for {position.asset}: {current_ltv:.2%}")
-                        
-                    if current_ltv > self.emergency_ltv:
-                        self.logger.error(f"Emergency LTV breach for {position.asset}: {current_ltv:.2%}")
-                        self._emergency_liquidate_position(position)
-                        
-        except Exception as e:
-            self.logger.error(f"Error monitoring positions: {e}")
+                self.logger.info(f"✅ Loaded {len(self.price_cache)} price pairs")
+        else:
+            self.logger.error("❌ Price Data: FAILED")
+        
+        # Test 5: Margin account
+        margin_result = self.binance_api.get_margin_account()
+        if "userAssets" in margin_result:
+            self.api_status["margin_access"] = "success"
+            self.logger.info("✅ Margin Access: SUCCESS")
+        else:
+            self.api_status["margin_access"] = f"failed: {margin_result.get('message', 'unknown')}"
+            self.logger.error("❌ Margin Access: FAILED")
+        
+        # Test 6: Flexible savings
+        savings_result = self.binance_api.get_flexible_products()
+        if savings_result:
+            self.api_status["savings_access"] = "success"
+            self.logger.info(f"✅ Savings Access: SUCCESS ({len(savings_result)} products)")
+        else:
+            self.api_status["savings_access"] = "failed"
+            self.logger.error("❌ Savings Access: FAILED")
+        
+        self.api_status["last_test"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self.logger.info("=== API CONNECTIVITY TESTS COMPLETE ===")
     
     def _get_asset_price(self, asset: str) -> float:
-        """Get current asset price in USDT - only for valid symbols"""
-        try:
-            if asset == 'USDT':
-                return 1.0
-                
-            symbol = f"{asset}USDT"
+        """Get asset price with detailed logging"""
+        if asset == 'USDT':
+            return 1.0
             
-            # Check if symbol exists in cache
-            if symbol in self.price_cache:
-                return self.price_cache[symbol]
-            
-            # Verify symbol exists before API call
-            if asset not in self.asset_config:
-                self.logger.warning(f"Asset {asset} not in valid configuration")
-                return 0.0
-            
-            # Fallback to API call
-            price_data = self.binance_api.get_symbol_price(symbol)
-            if price_data and 'price' in price_data:
-                price = float(price_data['price'])
-                self.price_cache[symbol] = price  # Cache the result
-                return price
-                
-        except Exception as e:
-            self.logger.error(f"Error getting price for {asset}: {e}")
+        symbol = f"{asset}USDT"
         
+        if symbol in self.price_cache:
+            price = self.price_cache[symbol]
+            self.logger.debug(f"Price from cache for {symbol}: {price}")
+            return price
+        
+        # Try API call
+        self.logger.warning(f"Price not in cache, fetching {symbol}")
+        price_data = self.binance_api.get_symbol_price(symbol)
+        if "price" in price_data:
+            price = float(price_data['price'])
+            self.price_cache[symbol] = price
+            return price
+        
+        self.logger.error(f"Failed to get price for {symbol}")
         return 0.0
     
-    def _emergency_liquidate_position(self, position: Position):
-        """Emergency liquidation of position"""
-        try:
-            self.logger.info(f"Starting emergency liquidation for {position.asset}")
-            
-            # 1. Redeem from flexible savings
-            if position.asset in self.flexible_products_cache:
-                product = self.flexible_products_cache[position.asset]
-                product_id = product.get('productId')
-                if product_id:
-                    self.binance_api.redeem_flexible_product(product_id, position.collateral_amount)
-                    self.logger.info(f"Redeemed {position.collateral_amount} {position.asset}")
-            
-            # 2. Sell collateral
-            symbol = f"{position.asset}USDT"
-            sell_order = self.binance_api.place_order(
-                symbol=symbol,
-                side='SELL',
-                order_type='MARKET',
-                quantity=position.collateral_amount
-            )
-            
-            if sell_order and 'orderId' in sell_order:
-                self.logger.info(f"Placed sell order for {position.asset}: {sell_order['orderId']}")
-                
-                # 3. Repay loan
-                time.sleep(2)  # Wait for order to execute
-                self.binance_api.margin_repay(position.loan_asset, position.loan_amount)
-                self.logger.info(f"Repaid {position.loan_amount} {position.loan_asset}")
-            
-            # Remove position
-            self.positions.remove(position)
-            
-        except Exception as e:
-            self.logger.error(f"Error in emergency liquidation: {e}")
-    
-    def _check_rebalance_needed(self):
-        """Check if portfolio rebalancing is needed"""
-        if datetime.now() - self.last_rebalance < timedelta(hours=1):
-            return
-        
-        try:
-            # Simple rebalancing logic
-            total_value = sum(pos.collateral_amount * self._get_asset_price(pos.asset) for pos in self.positions)
-            if total_value == 0:
-                return
-            
-            # Check if any position is too large (>40% of portfolio)
-            for position in self.positions:
-                position_value = position.collateral_amount * self._get_asset_price(position.asset)
-                position_weight = position_value / total_value
-                
-                if position_weight > 0.4:
-                    self.logger.info(f"Rebalancing needed for {position.asset} ({position_weight:.1%})")
-                    # Implement rebalancing logic here
-                    
-            self.last_rebalance = datetime.now()
-            
-        except Exception as e:
-            self.logger.error(f"Error checking rebalance: {e}")
-    
     async def start_trading(self, initial_capital: float):
-        """Start real trading operations"""
+        """Diagnostic trading start"""
         try:
-            self.logger.info(f"Starting real trading with capital: ${initial_capital}")
-            self.total_capital = initial_capital
-            self.is_running = True
-            self.bot_status = "Running"
+            self.logger.info(f"=== ATTEMPTING TO START TRADING WITH ${initial_capital} ===")
             
-            # Verify account and balances
+            # Re-test API before trading
+            self._test_api_connectivity()
+            
+            if self.api_status["account_access"] != "success":
+                raise Exception(f"Cannot start trading: Account access failed - {self.api_status['account_access']}")
+            
+            # Get fresh account info
             account_info = self.binance_api.get_account_info()
-            if not account_info:
-                raise Exception("Failed to get account info")
+            if "error" in account_info:
+                raise Exception(f"Account info error: {account_info['message']}")
             
-            # Get USDT balance
+            # Check USDT balance
             usdt_balance = 0
             for balance in account_info.get('balances', []):
                 if balance['asset'] == 'USDT':
                     usdt_balance = float(balance['free'])
                     break
             
+            self.logger.info(f"Available USDT balance: ${usdt_balance}")
+            
             if usdt_balance < initial_capital:
-                raise Exception(f"Insufficient USDT balance. Available: {usdt_balance}, Required: {initial_capital}")
+                raise Exception(f"Insufficient USDT balance. Available: ${usdt_balance}, Required: ${initial_capital}")
             
-            # Execute cascade strategy
-            await self._execute_cascade_strategy(initial_capital)
+            self.total_capital = initial_capital
+            self.is_running = True
+            self.bot_status = "Running"
             
-            self.logger.info("Trading started successfully")
+            self.logger.info("✅ Trading started successfully (diagnostic mode)")
             
         except Exception as e:
-            self.logger.error(f"Trading error: {e}")
+            self.logger.error(f"❌ Trading start failed: {e}")
             self.bot_status = "Error"
             raise
-    
-    async def _execute_cascade_strategy(self, capital: float):
-        """Execute the cascade leverage strategy"""
-        try:
-            current_capital = capital
-            
-            # Sort assets by profit potential - only valid symbols
-            valid_assets = [(k, v) for k, v in self.asset_config.items() if k not in ['USDT', 'USDC']]
-            sorted_assets = sorted(
-                valid_assets,
-                key=lambda x: (x[1].yield_rate - x[1].loan_rate) / (1 + x[1].volatility_factor),
-                reverse=True
-            )
-            
-            for level in range(min(self.max_cascade_levels, len(sorted_assets))):
-                if current_capital < 50:  # Minimum $50 USD
-                    break
-                
-                asset_name, asset_config = sorted_assets[level]
-                
-                # Calculate loan amount
-                max_loan = current_capital * asset_config.ltv_max * 0.95  # 5% buffer
-                
-                # Execute the cascade level
-                success = await self._execute_cascade_level(
-                    level + 1, asset_name, current_capital, max_loan
-                )
-                
-                if success:
-                    current_capital = max_loan
-                else:
-                    self.logger.warning(f"Failed to execute level {level + 1}, stopping cascade")
-                    break
-                    
-        except Exception as e:
-            self.logger.error(f"Error executing cascade strategy: {e}")
-            raise
-    
-    async def _execute_cascade_level(self, level: int, asset: str, collateral_amount: float, 
-                                   loan_amount: float) -> bool:
-        """Execute a single cascade level"""
-        try:
-            self.logger.info(f"Executing level {level}: {asset}, Collateral: ${collateral_amount:.2f}, Loan: ${loan_amount:.2f}")
-            
-            # 1. Buy the asset
-            symbol = f"{asset}USDT"
-            asset_price = self._get_asset_price(asset)
-            
-            if asset_price <= 0:
-                self.logger.error(f"Invalid price for {asset}")
-                return False
-            
-            quantity = collateral_amount / asset_price
-            
-            buy_order = self.binance_api.place_order(
-                symbol=symbol,
-                side='BUY',
-                order_type='MARKET',
-                quantity=quantity
-            )
-            
-            if not buy_order or 'orderId' not in buy_order:
-                self.logger.error(f"Failed to place buy order for {asset}")
-                return False
-            
-            self.logger.info(f"Bought {quantity:.6f} {asset} - Order ID: {buy_order['orderId']}")
-            
-            # 2. Transfer to margin account
-            transfer_result = self.binance_api.transfer_to_margin(asset, quantity)
-            if not transfer_result:
-                self.logger.error(f"Failed to transfer {asset} to margin")
-                return False
-            
-            # 3. Borrow USDT against the asset
-            borrow_result = self.binance_api.margin_borrow('USDT', loan_amount)
-            if not borrow_result:
-                self.logger.error(f"Failed to borrow USDT against {asset}")
-                return False
-            
-            self.logger.info(f"Borrowed ${loan_amount:.2f} USDT against {asset}")
-            
-            # 4. Transfer borrowed USDT back to spot for next level
-            transfer_back = self.binance_api.transfer_from_margin('USDT', loan_amount)
-            if not transfer_back:
-                self.logger.error(f"Failed to transfer borrowed USDT to spot")
-                return False
-            
-            # 5. Optionally put in flexible savings for additional yield
-            if asset in self.flexible_products_cache:
-                product = self.flexible_products_cache[asset]
-                product_id = product.get('productId')
-                if product_id:
-                    self.binance_api.purchase_flexible_product(product_id, quantity)
-                    self.logger.info(f"Put {quantity:.6f} {asset} in flexible savings")
-            
-            # 6. Create position record
-            position = Position(
-                asset=asset,
-                collateral_amount=quantity,
-                loan_amount=loan_amount,
-                loan_asset='USDT',
-                current_ltv=loan_amount / collateral_amount / asset_price,
-                yield_earned=0,
-                level=level,
-                order_id=buy_order['orderId']
-            )
-            
-            self.positions.append(position)
-            self.leveraged_capital += loan_amount
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error executing cascade level {level}: {e}")
-            return False
     
     def stop_trading(self):
-        """Stop trading and liquidate all positions"""
-        try:
-            self.logger.info("Stopping trading and liquidating positions")
-            self.is_running = False
-            self.bot_status = "Stopping"
-            
-            # Liquidate all positions
-            for position in self.positions[:]:  # Copy list to avoid modification during iteration
-                self._emergency_liquidate_position(position)
-            
-            self.positions.clear()
-            self.leveraged_capital = 0
-            self.total_yield = 0
-            self.bot_status = "Stopped"
-            
-            self.logger.info("All positions liquidated, trading stopped")
-            
-        except Exception as e:
-            self.logger.error(f"Error stopping trading: {e}")
-            self.bot_status = "Error"
+        """Stop trading"""
+        self.is_running = False
+        self.bot_status = "Stopped"
+        self.positions.clear()
+        self.leveraged_capital = 0
+        self.total_yield = 0
+        self.logger.info("Trading stopped")
     
     def get_portfolio_status(self) -> Dict:
-        """Get current portfolio status"""
-        total_collateral_value = 0
-        total_loan_value = 0
-        
-        for position in self.positions:
-            asset_price = self._get_asset_price(position.asset)
-            loan_price = self._get_asset_price(position.loan_asset)
-            
-            total_collateral_value += position.collateral_amount * asset_price
-            total_loan_value += position.loan_amount * loan_price
-        
-        net_value = total_collateral_value - total_loan_value
-        leverage_ratio = total_loan_value / self.total_capital if self.total_capital > 0 else 0
-        
-        # Calculate estimated annual yield
-        annual_yield = 0
-        for position in self.positions:
-            asset_config = self.asset_config.get(position.asset)
-            if asset_config:
-                net_rate = asset_config.yield_rate - asset_config.loan_rate
-                annual_yield += net_rate * position.loan_amount
-        
-        roi_percentage = (annual_yield / self.total_capital * 100) if self.total_capital > 0 else 0
-        
+        """Get portfolio status with API diagnostics"""
         return {
             'bot_status': self.bot_status,
             'total_positions': len(self.positions),
             'total_capital': self.total_capital,
-            'leveraged_capital': total_loan_value,
-            'net_portfolio_value': net_value,
-            'total_yield': roi_percentage,
-            'leverage_ratio': leverage_ratio,
+            'leveraged_capital': self.leveraged_capital,
+            'net_portfolio_value': self.total_capital,
+            'total_yield': 0,
+            'leverage_ratio': 0,
             'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'positions': [
-                {
-                    'level': pos.level,
-                    'asset': pos.asset,
-                    'collateral': pos.collateral_amount,
-                    'loan': pos.loan_amount,
-                    'ltv': pos.current_ltv,
-                    'usd_value': pos.collateral_amount * self._get_asset_price(pos.asset),
-                    'order_id': pos.order_id
-                }
-                for pos in self.positions
-            ]
+            'positions': [],
+            'api_status': self.api_status
         }
     
     def get_account_balances(self) -> Dict:
-        """Get current account balances"""
+        """Get account balances with detailed diagnostics"""
         try:
+            self.logger.info("=== GETTING ACCOUNT BALANCES ===")
+            
+            # Test API status first
+            if self.api_status["account_access"] != "success":
+                return {
+                    'total_usd_value': 0,
+                    'balances': {},
+                    'error': f"API not accessible: {self.api_status['account_access']}",
+                    'api_status': self.api_status,
+                    'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+            
+            # Get fresh account info
             account_info = self.binance_api.get_account_info()
-            margin_account = self.binance_api.get_margin_account()
-            flexible_positions = self.binance_api.get_flexible_positions()
+            if "error" in account_info:
+                return {
+                    'total_usd_value': 0,
+                    'balances': {},
+                    'error': f"Account info failed: {account_info['message']}",
+                    'api_status': self.api_status,
+                    'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
             
             balances = {}
             total_usd = 0
             
-            # Spot balances
-            if account_info and 'balances' in account_info:
-                for balance in account_info['balances']:
-                    asset = balance['asset']
-                    free = float(balance['free'])
-                    locked = float(balance['locked'])
-                    total = free + locked
-                    
-                    if total > 0.001:  # Filter dust
-                        price = self._get_asset_price(asset)
-                        usd_value = total * price
-                        total_usd += usd_value
-                        
-                        balances[asset] = {
-                            'spot_free': free,
-                            'spot_locked': locked,
-                            'spot_total': total,
-                            'margin_net': 0,
-                            'margin_borrowed': 0,
-                            'earn_amount': 0,
-                            'price': price,
-                            'usd_value': usd_value
-                        }
-            
-            # Margin balances
-            if margin_account and 'userAssets' in margin_account:
-                for asset_info in margin_account['userAssets']:
-                    asset = asset_info['asset']
-                    net_asset = float(asset_info.get('netAsset', 0))
-                    borrowed = float(asset_info.get('borrowed', 0))
-                    
-                    if asset not in balances:
-                        balances[asset] = {
-                            'spot_free': 0, 'spot_locked': 0, 'spot_total': 0,
-                            'margin_net': 0, 'margin_borrowed': 0, 'earn_amount': 0,
-                            'price': self._get_asset_price(asset), 'usd_value': 0
-                        }
-                    
-                    balances[asset]['margin_net'] = net_asset
-                    balances[asset]['margin_borrowed'] = borrowed
-                    
+            # Process spot balances
+            for balance in account_info.get('balances', []):
+                asset = balance['asset']
+                free = float(balance['free'])
+                locked = float(balance['locked'])
+                total = free + locked
+                
+                if total > 0.001:  # Filter dust
                     price = self._get_asset_price(asset)
-                    margin_usd_value = net_asset * price
-                    balances[asset]['usd_value'] += margin_usd_value
-                    total_usd += margin_usd_value
+                    usd_value = total * price
+                    total_usd += usd_value
+                    
+                    balances[asset] = {
+                        'spot_free': free,
+                        'spot_locked': locked,
+                        'spot_total': total,
+                        'margin_net': 0,
+                        'margin_borrowed': 0,
+                        'earn_amount': 0,
+                        'price': price,
+                        'usd_value': usd_value
+                    }
+                    
+                    self.logger.info(f"Balance: {asset} = {total} (${usd_value:.2f})")
             
-            # Flexible savings positions
-            if flexible_positions:
+            # Try margin account
+            if self.api_status["margin_access"] == "success":
+                margin_account = self.binance_api.get_margin_account()
+                if "userAssets" in margin_account:
+                    for asset_info in margin_account['userAssets']:
+                        asset = asset_info['asset']
+                        net_asset = float(asset_info.get('netAsset', 0))
+                        borrowed = float(asset_info.get('borrowed', 0))
+                        
+                        if asset in balances:
+                            balances[asset]['margin_net'] = net_asset
+                            balances[asset]['margin_borrowed'] = borrowed
+            
+            # Try flexible savings
+            if self.api_status["savings_access"] == "success":
+                flexible_positions = self.binance_api.get_flexible_positions()
                 for position in flexible_positions:
                     asset = position.get('asset', '')
                     amount = float(position.get('totalAmount', 0))
                     
-                    if asset and amount > 0.001:
-                        if asset not in balances:
-                            balances[asset] = {
-                                'spot_free': 0, 'spot_locked': 0, 'spot_total': 0,
-                                'margin_net': 0, 'margin_borrowed': 0, 'earn_amount': 0,
-                                'price': self._get_asset_price(asset), 'usd_value': 0
-                            }
-                        
+                    if asset in balances:
                         balances[asset]['earn_amount'] = amount
-                        
-                        price = self._get_asset_price(asset)
-                        earn_usd_value = amount * price
-                        balances[asset]['usd_value'] += earn_usd_value
-                        total_usd += earn_usd_value
             
-            return {
+            result = {
                 'total_usd_value': total_usd,
                 'balances': balances,
+                'api_status': self.api_status,
+                'price_cache_size': len(self.price_cache),
                 'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             
+            self.logger.info(f"✅ Balances loaded: {len(balances)} assets, ${total_usd:.2f} total")
+            return result
+            
         except Exception as e:
-            self.logger.error(f"Error getting account balances: {e}")
-            return {'total_usd_value': 0, 'balances': {}, 'error': str(e)}
+            self.logger.error(f"❌ Error getting balances: {e}")
+            return {
+                'total_usd_value': 0,
+                'balances': {},
+                'error': str(e),
+                'api_status': self.api_status,
+                'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
 
 # Global bot instance
 bot = None
@@ -762,25 +456,19 @@ HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Multi-Asset Leverage Bot - LIVE TRADING</title>
+    <title>Multi-Asset Leverage Bot - DIAGNOSTIC MODE</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { font-family: Arial, sans-serif; margin: 0; background: #f5f5f5; }
         
-        .live-banner {
-            background: linear-gradient(135deg, #ff4757, #ff6b7a);
+        .diagnostic-banner {
+            background: linear-gradient(135deg, #ff9500, #ff6b35);
             color: white;
             padding: 10px 20px;
             text-align: center;
             font-weight: bold;
             box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-            animation: pulse 2s infinite;
-        }
-        
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.8; }
         }
         
         .container { 
@@ -793,36 +481,36 @@ HTML_TEMPLATE = '''
         }
         
         .header { text-align: center; color: #333; margin-bottom: 30px; }
-        .controls { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 2px solid #28a745; }
-        .status { display: flex; justify-content: space-between; margin-bottom: 20px; }
-        .metric { background: #007bff; color: white; padding: 15px; border-radius: 8px; text-align: center; flex: 1; margin: 0 5px; }
-        .metric.yield { background: #28a745; }
-        .metric.leverage { background: #ffc107; color: #333; }
-        .metric.positions { background: #17a2b8; }
-        .metric.net-value { background: #6f42c1; }
+        .controls { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 2px solid #ff9500; }
         
-        .positions-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        .positions-table th, .positions-table td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-        .positions-table th { background: #f8f9fa; }
-        
-        .btn { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
-        .btn-primary { background: #007bff; color: white; }
-        .btn-danger { background: #dc3545; color: white; }
-        .btn-success { background: #28a745; color: white; }
-        
-        .input-group { margin: 10px 0; }
-        .input-group label { display: block; margin-bottom: 5px; font-weight: bold; }
-        .input-group input { width: 200px; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
-        
-        .status-indicator { padding: 5px 10px; border-radius: 20px; color: white; font-weight: bold; }
-        .status-running { background: #28a745; }
-        .status-stopped { background: #dc3545; }
-        .status-stopping { background: #ffc107; color: #333; }
-        .status-error { background: #dc3545; }
-        
-        .balances-section {
+        .api-status {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+        
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .status-item {
+            background: rgba(255,255,255,0.1);
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .status-success { background: rgba(40, 167, 69, 0.8); }
+        .status-failed { background: rgba(220, 53, 69, 0.8); }
+        .status-unknown { background: rgba(108, 117, 125, 0.8); }
+        
+        .balances-section {
+            background: #f8f9fa;
             padding: 20px;
             border-radius: 12px;
             margin-bottom: 20px;
@@ -836,15 +524,16 @@ HTML_TEMPLATE = '''
         }
         
         .balance-item {
-            background: rgba(255,255,255,0.1);
+            background: white;
             padding: 15px;
             border-radius: 8px;
             text-align: center;
+            border: 1px solid #dee2e6;
         }
         
         .balance-label {
             font-size: 12px;
-            opacity: 0.9;
+            color: #6c757d;
             margin-bottom: 5px;
             text-transform: uppercase;
         }
@@ -852,39 +541,84 @@ HTML_TEMPLATE = '''
         .balance-value {
             font-size: 18px;
             font-weight: bold;
+            color: #495057;
         }
         
         .asset-balances {
             max-height: 400px;
             overflow-y: auto;
-            background: rgba(255,255,255,0.1);
+            background: white;
             border-radius: 8px;
             padding: 15px;
+            border: 1px solid #dee2e6;
         }
         
-        .warning { background: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 8px; margin: 10px 0; }
-        .success { background: #d4edda; border: 1px solid #c3e6cb; padding: 15px; border-radius: 8px; margin: 10px 0; }
-        .error { background: #f8d7da; border: 1px solid #f5c6cb; padding: 15px; border-radius: 8px; margin: 10px 0; }
+        .btn { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
+        .btn-primary { background: #007bff; color: white; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-warning { background: #ffc107; color: #212529; }
         
-        @media (max-width: 768px) {
-            .status { flex-direction: column; }
-            .metric { margin: 5px 0; }
+        .input-group { margin: 10px 0; }
+        .input-group label { display: block; margin-bottom: 5px; font-weight: bold; }
+        .input-group input { width: 200px; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        
+        .diagnostic-info {
+            background: #e7f3ff;
+            border: 1px solid #b3d9ff;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+        
+        .error-info {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
         }
     </style>
 </head>
 <body>
-    <div class="live-banner">
-        🔴 LIVE TRADING MODE - REAL MONEY - USE WITH EXTREME CAUTION
+    <div class="diagnostic-banner">
+        🔧 DIAGNOSTIC MODE - API CONNECTIVITY TESTING
     </div>
 
     <div class="container">
         <div class="header">
-            <h1>🚀 Multi-Asset Leverage Bot</h1>
-            <p><strong>LIVE TRADING</strong> - Advanced Cascade Leverage Strategy</p>
+            <h1>🔧 Multi-Asset Leverage Bot - Diagnostics</h1>
+            <p><strong>API Testing & Troubleshooting Mode</strong></p>
+        </div>
+        
+        <div class="api-status">
+            <h3>🌐 API Connectivity Status</h3>
+            <div class="status-grid" id="api-status-grid">
+                <div class="status-item status-unknown">
+                    <div>Connection</div>
+                    <div id="status-connection">Testing...</div>
+                </div>
+                <div class="status-item status-unknown">
+                    <div>Authentication</div>
+                    <div id="status-auth">Testing...</div>
+                </div>
+                <div class="status-item status-unknown">
+                    <div>Account Access</div>
+                    <div id="status-account">Testing...</div>
+                </div>
+                <div class="status-item status-unknown">
+                    <div>Margin Access</div>
+                    <div id="status-margin">Testing...</div>
+                </div>
+                <div class="status-item status-unknown">
+                    <div>Savings Access</div>
+                    <div id="status-savings">Testing...</div>
+                </div>
+            </div>
+            <div>Last Test: <span id="last-test">Never</span></div>
         </div>
         
         <div class="balances-section">
-            <h3>💼 Account Overview</h3>
+            <h3>💼 Account Balances</h3>
             <div class="balance-grid">
                 <div class="balance-item">
                     <div class="balance-label">Total Portfolio Value</div>
@@ -895,17 +629,17 @@ HTML_TEMPLATE = '''
                     <div class="balance-value">$<span id="available-usdt">0.00</span></div>
                 </div>
                 <div class="balance-item">
-                    <div class="balance-label">Active Positions</div>
-                    <div class="balance-value"><span id="position-count">0</span></div>
+                    <div class="balance-label">Price Cache</div>
+                    <div class="balance-value"><span id="price-cache">0</span> pairs</div>
                 </div>
                 <div class="balance-item">
-                    <div class="balance-label">Total Loans</div>
-                    <div class="balance-value">$<span id="total-loans">0.00</span></div>
+                    <div class="balance-label">Assets Found</div>
+                    <div class="balance-value"><span id="asset-count">0</span></div>
                 </div>
             </div>
             
             <details>
-                <summary style="cursor: pointer; padding: 10px; background: rgba(255,255,255,0.1); border-radius: 5px;">
+                <summary style="cursor: pointer; padding: 10px; background: #e9ecef; border-radius: 5px;">
                     📊 View All Asset Balances
                 </summary>
                 <div class="asset-balances" id="asset-balances">
@@ -915,85 +649,28 @@ HTML_TEMPLATE = '''
         </div>
         
         <div class="controls">
-            <h3>🎯 Live Trading Control</h3>
-            <div class="warning">
-                <strong>⚠️ Warning:</strong> This will execute real trades with real money. Ensure you understand the risks.
+            <h3>🎯 Diagnostic Trading Test</h3>
+            <div class="diagnostic-info">
+                <strong>ℹ️ Info:</strong> This diagnostic version tests API connectivity and shows detailed error information.
             </div>
             <div class="input-group">
-                <label for="capital">Capital to Deploy (USD):</label>
-                <input type="number" id="capital" value="1000" min="50" step="50">
+                <label for="capital">Test Capital Amount (USD):</label>
+                <input type="number" id="capital" value="100" min="50" step="50">
             </div>
-            <button class="btn btn-success" onclick="startTrading()">🚀 START LIVE TRADING</button>
-            <button class="btn btn-danger" onclick="stopTrading()">⛔ STOP & LIQUIDATE ALL</button>
-            <button class="btn btn-primary" onclick="updateStatus()">🔄 Refresh Status</button>
+            <button class="btn btn-warning" onclick="testTrading()">🧪 TEST TRADING SETUP</button>
+            <button class="btn btn-danger" onclick="stopTrading()">⛔ STOP</button>
+            <button class="btn btn-primary" onclick="refreshDiagnostics()">🔄 Refresh Diagnostics</button>
         </div>
         
-        <div class="status" id="status">
-            <div class="metric">
-                <div>Bot Status</div>
-                <div><span id="bot-status" class="status-indicator status-stopped">Stopped</span></div>
-            </div>
-            <div class="metric">
-                <div>Deployed Capital</div>
-                <div>$<span id="total-capital">0</span></div>
-            </div>
-            <div class="metric leverage">
-                <div>Total Loans</div>
-                <div>$<span id="leveraged-capital">0</span></div>
-            </div>
-            <div class="metric net-value">
-                <div>Net Value</div>
-                <div>$<span id="net-value">0</span></div>
-            </div>
-            <div class="metric yield">
-                <div>Est. Annual ROI</div>
-                <div><span id="total-yield">0</span>%</div>
-            </div>
-        </div>
-        
-        <div>
-            <h3>📊 Active Trading Positions</h3>
-            <table class="positions-table" id="positions-table">
-                <thead>
-                    <tr>
-                        <th>Level</th>
-                        <th>Asset</th>
-                        <th>Collateral</th>
-                        <th>Loan (USDT)</th>
-                        <th>LTV</th>
-                        <th>USD Value</th>
-                        <th>Order ID</th>
-                    </tr>
-                </thead>
-                <tbody id="positions-body">
-                    <tr>
-                        <td colspan="7" style="text-align: center; color: #666;">No active positions</td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
+        <div id="diagnostic-messages"></div>
     </div>
 
     <script>
-        let isTrading = false;
-        
-        async function startTrading() {
-            if (isTrading) return;
-            
+        async function testTrading() {
             const capital = document.getElementById('capital').value;
             
-            if (!confirm(`Are you sure you want to start live trading with $${capital}? This will use real money and execute real trades.`)) {
-                return;
-            }
-            
-            if (!confirm('FINAL WARNING: This is live trading with real money. Losses can occur. Continue?')) {
-                return;
-            }
-            
-            isTrading = true;
-            
             try {
-                showMessage('Starting live trading...', 'warning');
+                showMessage('Testing trading setup...', 'info');
                 
                 const response = await fetch('/start', {
                     method: 'POST',
@@ -1004,38 +681,30 @@ HTML_TEMPLATE = '''
                 const result = await response.json();
                 
                 if (result.success) {
-                    showMessage('Live trading started successfully!', 'success');
-                    setTimeout(updateStatus, 2000);
+                    showMessage('Trading test completed successfully!', 'success');
                 } else {
-                    showMessage(`Error: ${result.error}`, 'error');
+                    showMessage(`Trading test failed: ${result.error}`, 'error');
                 }
+                
+                setTimeout(refreshDiagnostics, 1000);
             } catch (error) {
                 showMessage(`Network error: ${error.message}`, 'error');
-            } finally {
-                isTrading = false;
             }
         }
         
         async function stopTrading() {
-            if (!confirm('Stop trading and liquidate ALL positions? This will close all open trades.')) {
-                return;
-            }
-            
             try {
-                showMessage('Stopping trading and liquidating positions...', 'warning');
-                
                 const response = await fetch('/stop', { method: 'POST' });
                 const result = await response.json();
-                
-                if (result.success) {
-                    showMessage('Trading stopped and positions liquidated.', 'success');
-                    setTimeout(updateStatus, 2000);
-                } else {
-                    showMessage(`Error: ${result.error}`, 'error');
-                }
+                showMessage('Trading stopped', 'info');
+                setTimeout(refreshDiagnostics, 1000);
             } catch (error) {
-                showMessage(`Network error: ${error.message}`, 'error');
+                showMessage(`Error stopping: ${error.message}`, 'error');
             }
+        }
+        
+        async function refreshDiagnostics() {
+            await Promise.all([updateBalances(), updateStatus()]);
         }
         
         async function updateStatus() {
@@ -1043,38 +712,9 @@ HTML_TEMPLATE = '''
                 const response = await fetch('/status');
                 const data = await response.json();
                 
-                // Update metrics
-                document.getElementById('total-capital').textContent = data.total_capital.toLocaleString();
-                document.getElementById('leveraged-capital').textContent = data.leveraged_capital.toLocaleString();
-                document.getElementById('net-value').textContent = data.net_portfolio_value.toLocaleString();
-                document.getElementById('total-yield').textContent = data.total_yield.toFixed(2);
-                document.getElementById('position-count').textContent = data.total_positions;
-                
-                // Update bot status
-                const statusElement = document.getElementById('bot-status');
-                statusElement.textContent = data.bot_status;
-                statusElement.className = 'status-indicator status-' + data.bot_status.toLowerCase();
-                
-                // Update positions table
-                const tbody = document.getElementById('positions-body');
-                tbody.innerHTML = '';
-                
-                if (data.positions.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #666;">No active positions</td></tr>';
-                } else {
-                    data.positions.forEach(pos => {
-                        const row = document.createElement('tr');
-                        row.innerHTML = `
-                            <td>${pos.level}</td>
-                            <td><strong>${pos.asset}</strong></td>
-                            <td>${pos.collateral.toFixed(6)}</td>
-                            <td>$${pos.loan.toLocaleString()}</td>
-                            <td>${(pos.ltv * 100).toFixed(1)}%</td>
-                            <td>$${pos.usd_value.toLocaleString()}</td>
-                            <td><code>${pos.order_id || 'N/A'}</code></td>
-                        `;
-                        tbody.appendChild(row);
-                    });
+                // Update API status
+                if (data.api_status) {
+                    updateApiStatus(data.api_status);
                 }
             } catch (error) {
                 console.error('Error updating status:', error);
@@ -1086,8 +726,10 @@ HTML_TEMPLATE = '''
                 const response = await fetch('/balances');
                 const data = await response.json();
                 
-                // Update main balance metrics
+                // Update main metrics
                 document.getElementById('total-portfolio').textContent = data.total_usd_value.toLocaleString(undefined, {minimumFractionDigits: 2});
+                document.getElementById('price-cache').textContent = data.price_cache_size || 0;
+                document.getElementById('asset-count').textContent = Object.keys(data.balances).length;
                 
                 // Find USDT balance
                 const usdtBalance = data.balances['USDT'];
@@ -1095,61 +737,103 @@ HTML_TEMPLATE = '''
                     document.getElementById('available-usdt').textContent = usdtBalance.spot_free.toLocaleString(undefined, {minimumFractionDigits: 2});
                 }
                 
-                // Calculate total loans
-                let totalLoans = 0;
-                Object.values(data.balances).forEach(balance => {
-                    totalLoans += balance.margin_borrowed * balance.price;
-                });
-                document.getElementById('total-loans').textContent = totalLoans.toLocaleString(undefined, {minimumFractionDigits: 2});
+                // Update API status from balance response
+                if (data.api_status) {
+                    updateApiStatus(data.api_status);
+                }
+                
+                // Show any errors
+                if (data.error) {
+                    showMessage(`Balance Error: ${data.error}`, 'error');
+                }
                 
                 // Update detailed balances
                 const balancesDiv = document.getElementById('asset-balances');
                 balancesDiv.innerHTML = '';
                 
                 Object.entries(data.balances).forEach(([asset, balance]) => {
-                    if (balance.usd_value > 1) { // Only show balances > $1
+                    if (balance.usd_value > 0.1) {
                         const div = document.createElement('div');
-                        div.style.cssText = 'margin: 5px 0; padding: 10px; background: rgba(255,255,255,0.1); border-radius: 5px;';
+                        div.style.cssText = 'margin: 5px 0; padding: 10px; background: #f8f9fa; border-radius: 5px; border: 1px solid #dee2e6;';
                         div.innerHTML = `
                             <strong>${asset}</strong> - $${balance.usd_value.toFixed(2)}
                             <br><small>
                                 Spot: ${balance.spot_total.toFixed(6)} | 
-                                Margin: ${balance.margin_net.toFixed(6)} | 
-                                Borrowed: ${balance.margin_borrowed.toFixed(6)} |
-                                Earn: ${balance.earn_amount.toFixed(6)}
+                                Price: $${balance.price.toFixed(6)}
                             </small>
                         `;
                         balancesDiv.appendChild(div);
                     }
                 });
                 
+                if (Object.keys(data.balances).length === 0) {
+                    balancesDiv.innerHTML = '<div style="text-align: center; color: #6c757d;">No balances found</div>';
+                }
+                
             } catch (error) {
                 console.error('Error updating balances:', error);
+                showMessage(`Error updating balances: ${error.message}`, 'error');
+            }
+        }
+        
+        function updateApiStatus(apiStatus) {
+            const statusMap = {
+                'connection': 'status-connection',
+                'authentication': 'status-auth',
+                'account_access': 'status-account',
+                'margin_access': 'status-margin',
+                'savings_access': 'status-savings'
+            };
+            
+            Object.entries(statusMap).forEach(([key, elementId]) => {
+                const element = document.getElementById(elementId);
+                const status = apiStatus[key];
+                const parentElement = element.parentElement;
+                
+                // Remove existing status classes
+                parentElement.classList.remove('status-success', 'status-failed', 'status-unknown');
+                
+                if (status === 'success') {
+                    element.textContent = '✅ Success';
+                    parentElement.classList.add('status-success');
+                } else if (status && status.startsWith('failed')) {
+                    element.textContent = '❌ Failed';
+                    parentElement.classList.add('status-failed');
+                } else {
+                    element.textContent = status || 'Unknown';
+                    parentElement.classList.add('status-unknown');
+                }
+            });
+            
+            if (apiStatus.last_test) {
+                document.getElementById('last-test').textContent = apiStatus.last_test;
             }
         }
         
         function showMessage(text, type) {
-            // Remove existing messages
-            const existing = document.querySelector('.message');
-            if (existing) existing.remove();
+            const messagesDiv = document.getElementById('diagnostic-messages');
             
             const div = document.createElement('div');
-            div.className = `message ${type}`;
-            div.textContent = text;
+            div.className = type === 'error' ? 'error-info' : 'diagnostic-info';
+            div.innerHTML = `<strong>${new Date().toLocaleTimeString()}:</strong> ${text}`;
             
-            const controls = document.querySelector('.controls');
-            controls.appendChild(div);
+            messagesDiv.appendChild(div);
             
-            setTimeout(() => div.remove(), 5000);
+            // Remove old messages (keep last 10)
+            const messages = messagesDiv.children;
+            while (messages.length > 10) {
+                messagesDiv.removeChild(messages[0]);
+            }
+            
+            // Scroll to bottom
+            div.scrollIntoView();
         }
         
-        // Auto-update intervals
-        setInterval(updateStatus, 15000);   // Every 15 seconds
-        setInterval(updateBalances, 30000); // Every 30 seconds
+        // Auto-refresh every 30 seconds
+        setInterval(refreshDiagnostics, 30000);
         
         // Initial load
-        updateStatus();
-        updateBalances();
+        refreshDiagnostics();
     </script>
 </body>
 </html>
@@ -1174,8 +858,9 @@ def start_trading():
         if not api_key or not api_secret:
             return jsonify({'success': False, 'error': 'API credentials not configured. Set BINANCE_API_KEY and BINANCE_API_SECRET environment variables.'})
         
-        # Create new bot instance
-        bot = MultiAssetLeverageBot(api_key, api_secret, testnet)
+        # Create new bot instance if needed
+        if not bot:
+            bot = MultiAssetLeverageBot(api_key, api_secret, testnet)
         
         # Start trading in a separate thread
         def start_async():
@@ -1184,7 +869,7 @@ def start_trading():
         thread = threading.Thread(target=start_async)
         thread.start()
         
-        return jsonify({'success': True, 'message': 'Live trading started successfully'})
+        return jsonify({'success': True, 'message': 'Trading test started successfully'})
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1195,7 +880,7 @@ def stop_trading():
     try:
         if bot:
             bot.stop_trading()
-        return jsonify({'success': True, 'message': 'Trading stopped and positions liquidated'})
+        return jsonify({'success': True, 'message': 'Trading stopped'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
@@ -1206,7 +891,7 @@ def get_status():
         return jsonify(bot.get_portfolio_status())
     else:
         return jsonify({
-            'bot_status': 'Stopped',
+            'bot_status': 'Not Initialized',
             'total_positions': 0,
             'total_capital': 0,
             'leveraged_capital': 0,
@@ -1214,30 +899,39 @@ def get_status():
             'total_yield': 0,
             'leverage_ratio': 0,
             'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'positions': []
+            'positions': [],
+            'api_status': {
+                'connection': 'unknown',
+                'authentication': 'unknown',
+                'account_access': 'unknown',
+                'margin_access': 'unknown',
+                'savings_access': 'unknown',
+                'last_test': None
+            }
         })
 
 @app.route('/balances')
 def get_balances():
     global bot
-    if bot:
-        return jsonify(bot.get_account_balances())
-    else:
-        return jsonify({
-            'total_usd_value': 0,
-            'balances': {},
-            'error': 'Bot not initialized'
-        })
-
-@app.route('/assets')
-def get_assets():
-    global bot
-    if bot:
-        return jsonify({k: v.__dict__ for k, v in bot.asset_config.items()})
-    else:
-        # Return default configuration
-        temp_bot = MultiAssetLeverageBot('demo', 'demo')
-        return jsonify({k: v.__dict__ for k, v in temp_bot.asset_config.items()})
+    
+    # Create bot instance if it doesn't exist
+    if not bot:
+        api_key = os.getenv('BINANCE_API_KEY')
+        api_secret = os.getenv('BINANCE_API_SECRET')
+        testnet = os.getenv('BINANCE_TESTNET', 'false').lower() == 'true'
+        
+        if not api_key or not api_secret:
+            return jsonify({
+                'total_usd_value': 0,
+                'balances': {},
+                'error': 'API credentials not configured',
+                'api_status': {'connection': 'failed: no credentials'},
+                'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            })
+        
+        bot = MultiAssetLeverageBot(api_key, api_secret, testnet)
+    
+    return jsonify(bot.get_account_balances())
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
