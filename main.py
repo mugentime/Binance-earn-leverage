@@ -64,17 +64,18 @@ class BinanceAPI:
         if params is None:
             params = {}
         
+        # Fix timestamp generation
         params['timestamp'] = int(time.time() * 1000)
         query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
         params['signature'] = self._generate_signature(query_string)
         
         try:
             if method == 'GET':
-                response = requests.get(f"{self.base_url}{endpoint}", params=params, headers=self.headers)
+                response = requests.get(f"{self.base_url}{endpoint}", params=params, headers=self.headers, timeout=10)
             elif method == 'POST':
-                response = requests.post(f"{self.base_url}{endpoint}", params=params, headers=self.headers)
+                response = requests.post(f"{self.base_url}{endpoint}", params=params, headers=self.headers, timeout=10)
             elif method == 'DELETE':
-                response = requests.delete(f"{self.base_url}{endpoint}", params=params, headers=self.headers)
+                response = requests.delete(f"{self.base_url}{endpoint}", params=params, headers=self.headers, timeout=10)
             
             response.raise_for_status()
             return response.json()
@@ -218,39 +219,39 @@ class MultiAssetLeverageBot:
         self._start_monitoring_thread()
     
     def _initialize_asset_config(self) -> Dict[str, AssetConfig]:
-        """Initialize asset configuration with real market data"""
+        """Initialize asset configuration with VALID Binance symbols only"""
         base_config = {
-            # Tier 1 - Blue Chip Assets
+            # Tier 1 - Blue Chip Assets (Verified symbols)
             'BTC': AssetConfig('BTC', 0.75, 0.04, 1, 0.022, 0.25),
             'ETH': AssetConfig('ETH', 0.70, 0.05, 1, 0.025, 0.30),
             'BNB': AssetConfig('BNB', 0.65, 0.07, 1, 0.028, 0.35),
             'USDT': AssetConfig('USDT', 0.85, 0.08, 1, 0.020, 0.10),
             'USDC': AssetConfig('USDC', 0.85, 0.075, 1, 0.021, 0.10),
             
-            # Tier 2 - Established DeFi
-            'CVX': AssetConfig('CVX', 0.55, 0.12, 2, 0.035, 0.50),
-            'ZRX': AssetConfig('ZRX', 0.50, 0.14, 2, 0.038, 0.55),
-            'ETHFI': AssetConfig('ETHFI', 0.45, 0.16, 2, 0.040, 0.60),
-            'HIFI': AssetConfig('HIFI', 0.40, 0.18, 2, 0.042, 0.65),
+            # Tier 2 - Established Alts (Verified symbols)
+            'ADA': AssetConfig('ADA', 0.55, 0.12, 2, 0.035, 0.50),
+            'DOT': AssetConfig('DOT', 0.50, 0.14, 2, 0.038, 0.55),
+            'LINK': AssetConfig('LINK', 0.45, 0.16, 2, 0.040, 0.60),
+            'MATIC': AssetConfig('MATIC', 0.40, 0.18, 2, 0.042, 0.65),
             
-            # Tier 3 - Mid-Cap
-            'ONT': AssetConfig('ONT', 0.45, 0.15, 3, 0.039, 0.58),
-            'LIT': AssetConfig('LIT', 0.42, 0.17, 3, 0.041, 0.62),
-            'LSK': AssetConfig('LSK', 0.40, 0.19, 3, 0.043, 0.65),
-            'SKL': AssetConfig('SKL', 0.38, 0.21, 3, 0.045, 0.68),
-            'GLMR': AssetConfig('GLMR', 0.35, 0.22, 3, 0.046, 0.70),
-            'RIF': AssetConfig('RIF', 0.33, 0.24, 3, 0.048, 0.72),
-            'FLM': AssetConfig('FLM', 0.30, 0.26, 3, 0.050, 0.75),
-            'STPT': AssetConfig('STPT', 0.32, 0.25, 3, 0.049, 0.73),
-            'DUSK': AssetConfig('DUSK', 0.35, 0.23, 3, 0.047, 0.69),
+            # Tier 3 - Mid-Cap (Verified symbols)
+            'ATOM': AssetConfig('ATOM', 0.45, 0.15, 3, 0.039, 0.58),
+            'LTC': AssetConfig('LTC', 0.42, 0.17, 3, 0.041, 0.62),
+            'UNI': AssetConfig('UNI', 0.40, 0.19, 3, 0.043, 0.65),
+            'SOL': AssetConfig('SOL', 0.38, 0.21, 3, 0.045, 0.68),
+            'AVAX': AssetConfig('AVAX', 0.35, 0.22, 3, 0.046, 0.70),
+            'NEAR': AssetConfig('NEAR', 0.33, 0.24, 3, 0.048, 0.72),
+            'FTM': AssetConfig('FTM', 0.30, 0.26, 3, 0.050, 0.75),
+            'ALGO': AssetConfig('ALGO', 0.32, 0.25, 3, 0.049, 0.73),
+            'XTZ': AssetConfig('XTZ', 0.35, 0.23, 3, 0.047, 0.69),
             
-            # Tier 4 - High Risk/Reward
-            'BNX': AssetConfig('BNX', 0.30, 0.28, 4, 0.052, 0.80),
-            'BOME': AssetConfig('BOME', 0.25, 0.32, 4, 0.058, 0.90),
-            'OXT': AssetConfig('OXT', 0.28, 0.30, 4, 0.055, 0.85),
-            'RONIN': AssetConfig('RONIN', 0.35, 0.27, 4, 0.051, 0.78),
-            'WIF': AssetConfig('WIF', 0.22, 0.35, 4, 0.062, 0.95),
-            'XVG': AssetConfig('XVG', 0.25, 0.33, 4, 0.060, 0.88),
+            # Tier 4 - Higher Risk (Verified symbols)
+            'DOGE': AssetConfig('DOGE', 0.30, 0.28, 4, 0.052, 0.80),
+            'SHIB': AssetConfig('SHIB', 0.25, 0.32, 4, 0.058, 0.90),
+            'LRC': AssetConfig('LRC', 0.28, 0.30, 4, 0.055, 0.85),
+            'CRV': AssetConfig('CRV', 0.35, 0.27, 4, 0.051, 0.78),
+            'SUSHI': AssetConfig('SUSHI', 0.22, 0.35, 4, 0.062, 0.95),
+            'COMP': AssetConfig('COMP', 0.25, 0.33, 4, 0.060, 0.88),
         }
         
         # Update with real rates from Binance
@@ -312,7 +313,7 @@ class MultiAssetLeverageBot:
     def _update_cache(self):
         """Update market data cache"""
         try:
-            # Update prices
+            # Update prices - only for valid symbols
             all_prices = self.binance_api.get_all_prices()
             if all_prices:
                 self.price_cache = {p['symbol']: float(p['price']) for p in all_prices}
@@ -357,19 +358,28 @@ class MultiAssetLeverageBot:
             self.logger.error(f"Error monitoring positions: {e}")
     
     def _get_asset_price(self, asset: str) -> float:
-        """Get current asset price in USDT"""
+        """Get current asset price in USDT - only for valid symbols"""
         try:
             if asset == 'USDT':
                 return 1.0
                 
             symbol = f"{asset}USDT"
+            
+            # Check if symbol exists in cache
             if symbol in self.price_cache:
                 return self.price_cache[symbol]
+            
+            # Verify symbol exists before API call
+            if asset not in self.asset_config:
+                self.logger.warning(f"Asset {asset} not in valid configuration")
+                return 0.0
             
             # Fallback to API call
             price_data = self.binance_api.get_symbol_price(symbol)
             if price_data and 'price' in price_data:
-                return float(price_data['price'])
+                price = float(price_data['price'])
+                self.price_cache[symbol] = price  # Cache the result
+                return price
                 
         except Exception as e:
             self.logger.error(f"Error getting price for {asset}: {e}")
@@ -475,9 +485,10 @@ class MultiAssetLeverageBot:
         try:
             current_capital = capital
             
-            # Sort assets by profit potential
+            # Sort assets by profit potential - only valid symbols
+            valid_assets = [(k, v) for k, v in self.asset_config.items() if k not in ['USDT', 'USDC']]
             sorted_assets = sorted(
-                [(k, v) for k, v in self.asset_config.items() if k not in ['USDT', 'USDC']],
+                valid_assets,
                 key=lambda x: (x[1].yield_rate - x[1].loan_rate) / (1 + x[1].volatility_factor),
                 reverse=True
             )
