@@ -32,11 +32,11 @@ class Position:
     yield_earned: float
     level: int
     order_id: str = None
-    margin_transferred: bool = False
-    savings_deposited: bool = False
+    earn_product_id: str = None
+    loan_order_id: str = None
 
 class BinanceAPI:
-    """Complete Binance API for real trading"""
+    """Complete Binance API for earn wallet leverage trading"""
     
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
         self.api_key = api_key
@@ -128,56 +128,77 @@ class BinanceAPI:
             'orderId': order_id
         }, require_auth=True)
     
-    def get_margin_account(self) -> Dict:
-        return self._make_request("/sapi/v1/margin/account", require_auth=True)
+    # EARN WALLET / LENDING APIS
+    def get_flexible_products(self) -> List[Dict]:
+        """Get available flexible savings products"""
+        return self._make_request("/sapi/v1/lending/daily/product/list", {
+            'status': 'PURCHASING'
+        }, require_auth=True)
     
-    def margin_borrow(self, asset: str, amount: float) -> Dict:
-        """Execute real margin borrow"""
+    def purchase_flexible_product(self, product_id: str, amount: float) -> Dict:
+        """Deposit asset into flexible savings (earn wallet)"""
         params = {
-            'asset': asset,
+            'productId': product_id,
             'amount': f"{amount:.8f}".rstrip('0').rstrip('.')
         }
-        self.logger.info(f"💰 REAL MARGIN BORROW: {amount} {asset}")
-        return self._make_request("/sapi/v1/margin/loan", params, method='POST', require_auth=True)
+        self.logger.info(f"💰 DEPOSITING TO EARN WALLET: {amount} - Product: {product_id}")
+        return self._make_request("/sapi/v1/lending/daily/purchase", params, method='POST', require_auth=True)
     
-    def margin_repay(self, asset: str, amount: float) -> Dict:
-        """Execute real margin repay"""
+    def redeem_flexible_product(self, product_id: str, amount: float) -> Dict:
+        """Withdraw from flexible savings"""
         params = {
-            'asset': asset,
+            'productId': product_id,
+            'amount': f"{amount:.8f}".rstrip('0').rstrip('.'),
+            'type': 'FAST'
+        }
+        self.logger.info(f"💸 WITHDRAWING FROM EARN WALLET: {amount} - Product: {product_id}")
+        return self._make_request("/sapi/v1/lending/daily/redeem", params, method='POST', require_auth=True)
+    
+    def get_flexible_positions(self) -> List[Dict]:
+        """Get current flexible savings positions"""
+        return self._make_request("/sapi/v1/lending/daily/token/position", require_auth=True)
+    
+    # CRYPTO LOAN APIS (Borrow against earn positions)
+    def get_loan_products(self) -> List[Dict]:
+        """Get available crypto loan products"""
+        return self._make_request("/sapi/v1/loan/flexible/ongoing/orders", require_auth=True)
+    
+    def apply_crypto_loan(self, loan_coin: str, collateral_coin: str, loan_amount: float) -> Dict:
+        """Apply for crypto loan (borrow against earn positions)"""
+        params = {
+            'loanCoin': loan_coin,
+            'collateralCoin': collateral_coin,
+            'loanAmount': f"{loan_amount:.8f}".rstrip('0').rstrip('.')
+        }
+        self.logger.info(f"🏦 APPLYING FOR CRYPTO LOAN: {loan_amount} {loan_coin} using {collateral_coin}")
+        return self._make_request("/sapi/v1/loan/flexible/borrow", params, method='POST', require_auth=True)
+    
+    def repay_crypto_loan(self, order_id: str, amount: float) -> Dict:
+        """Repay crypto loan"""
+        params = {
+            'orderId': order_id,
             'amount': f"{amount:.8f}".rstrip('0').rstrip('.')
         }
-        self.logger.info(f"💸 REAL MARGIN REPAY: {amount} {asset}")
-        return self._make_request("/sapi/v1/margin/repay", params, method='POST', require_auth=True)
+        self.logger.info(f"💳 REPAYING CRYPTO LOAN: {amount} - Order: {order_id}")
+        return self._make_request("/sapi/v1/loan/flexible/repay", params, method='POST', require_auth=True)
     
-    def transfer_to_margin(self, asset: str, amount: float) -> Dict:
-        """Transfer assets to margin account"""
-        params = {
-            'asset': asset,
-            'amount': f"{amount:.8f}".rstrip('0').rstrip('.'),
-            'type': 1  # MAIN_MARGIN
-        }
-        self.logger.info(f"📤 TRANSFER TO MARGIN: {amount} {asset}")
-        return self._make_request("/sapi/v1/margin/transfer", params, method='POST', require_auth=True)
+    def get_loan_orders(self) -> List[Dict]:
+        """Get ongoing crypto loan orders"""
+        return self._make_request("/sapi/v1/loan/flexible/ongoing/orders", require_auth=True)
     
-    def transfer_from_margin(self, asset: str, amount: float) -> Dict:
-        """Transfer assets from margin account"""
-        params = {
-            'asset': asset,
-            'amount': f"{amount:.8f}".rstrip('0').rstrip('.'),
-            'type': 2  # MARGIN_MAIN
-        }
-        self.logger.info(f"📥 TRANSFER FROM MARGIN: {amount} {asset}")
-        return self._make_request("/sapi/v1/margin/transfer", params, method='POST', require_auth=True)
+    def get_loan_ltv(self) -> Dict:
+        """Get loan-to-value ratios for all assets"""
+        return self._make_request("/sapi/v1/loan/flexible/ltv", require_auth=True)
 
-class MultiAssetLeverageBot:
-    """REAL TRADING BOT - Executes actual trades"""
+class EarnWalletLeverageBot:
+    """EARN WALLET LEVERAGE BOT - Creates leveraged positions using Binance's lending products"""
     
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = testnet
         
-        # Enhanced logging for real trading
+        # Enhanced logging
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s'
@@ -187,9 +208,9 @@ class MultiAssetLeverageBot:
         # Initialize API
         self.binance_api = BinanceAPI(api_key, api_secret, testnet)
         
-        # Trading configuration - REAL STRATEGY
+        # Trading configuration
         self.asset_config = self._initialize_asset_config()
-        self.max_cascade_levels = 3  # Start with 3 levels for safety
+        self.max_cascade_levels = 3
         self.target_total_leverage = 2.0
         self.emergency_ltv = 0.85
         
@@ -203,22 +224,21 @@ class MultiAssetLeverageBot:
         self.is_running = False
         self.bot_status = "Stopped"
         self.price_cache = {}
+        self.flexible_products_cache = {}
         
-        # Load initial price cache
+        # Load initial data
         self._update_price_cache()
+        self._load_flexible_products()
     
     def _initialize_asset_config(self) -> Dict[str, AssetConfig]:
-        """Asset configuration for real trading - conservative settings"""
+        """Asset configuration for earn wallet leverage"""
         return {
-            # Conservative Tier 1 - High liquidity, lower LTV for safety
-            'BTC': AssetConfig('BTC', 0.60, 0.04, 1, 0.025, 0.25),
-            'ETH': AssetConfig('ETH', 0.55, 0.05, 1, 0.028, 0.30),
-            'BNB': AssetConfig('BNB', 0.50, 0.06, 1, 0.030, 0.35),
-            
-            # Tier 2 - Medium liquidity
-            'ADA': AssetConfig('ADA', 0.45, 0.08, 2, 0.035, 0.50),
-            'DOT': AssetConfig('DOT', 0.40, 0.09, 2, 0.038, 0.55),
-            'LINK': AssetConfig('LINK', 0.35, 0.10, 2, 0.040, 0.60),
+            'BTC': AssetConfig('BTC', 0.65, 0.04, 1, 0.025, 0.25),
+            'ETH': AssetConfig('ETH', 0.60, 0.05, 1, 0.028, 0.30),
+            'BNB': AssetConfig('BNB', 0.55, 0.06, 1, 0.030, 0.35),
+            'ADA': AssetConfig('ADA', 0.50, 0.08, 2, 0.035, 0.50),
+            'DOT': AssetConfig('DOT', 0.45, 0.09, 2, 0.038, 0.55),
+            'LINK': AssetConfig('LINK', 0.40, 0.10, 2, 0.040, 0.60),
         }
     
     def _update_price_cache(self):
@@ -230,6 +250,16 @@ class MultiAssetLeverageBot:
                 self.logger.info(f"📊 Price cache updated: {len(self.price_cache)} pairs")
         except Exception as e:
             self.logger.error(f"Error updating prices: {e}")
+    
+    def _load_flexible_products(self):
+        """Load available flexible savings products"""
+        try:
+            products = self.binance_api.get_flexible_products()
+            if products and isinstance(products, list):
+                self.flexible_products_cache = {p['asset']: p for p in products}
+                self.logger.info(f"💰 Loaded {len(self.flexible_products_cache)} flexible products")
+        except Exception as e:
+            self.logger.error(f"Error loading flexible products: {e}")
     
     def _get_asset_price(self, asset: str) -> float:
         """Get current asset price"""
@@ -250,7 +280,7 @@ class MultiAssetLeverageBot:
         return 0.0
     
     def _get_symbol_info(self, symbol: str) -> Dict:
-        """Get trading symbol information for proper quantity formatting"""
+        """Get trading symbol information"""
         try:
             exchange_info = self.binance_api.get_exchange_info()
             if "symbols" in exchange_info:
@@ -268,16 +298,13 @@ class MultiAssetLeverageBot:
             for filter_item in symbol_info.get("filters", []):
                 if filter_item["filterType"] == "LOT_SIZE":
                     step_size = float(filter_item["stepSize"])
-                    # Round down to step size
                     return float(int(quantity / step_size) * step_size)
-        
-        # Default to 6 decimal places
         return round(quantity, 6)
     
     async def start_trading(self, initial_capital: float):
-        """Start REAL trading with actual strategy execution"""
+        """Start EARN WALLET leverage trading"""
         try:
-            self.logger.info(f"🚀 STARTING REAL TRADING WITH ${initial_capital}")
+            self.logger.info(f"🚀 STARTING EARN WALLET LEVERAGE WITH ${initial_capital}")
             
             # Validate account
             account_info = self.binance_api.get_account_info()
@@ -296,35 +323,35 @@ class MultiAssetLeverageBot:
             
             self.total_capital = initial_capital
             self.is_running = True
-            self.bot_status = "Executing Strategy"
+            self.bot_status = "Executing Earn Strategy"
             
-            # Execute the REAL cascade strategy
-            self.logger.info("🔥 EXECUTING REAL TRADING STRATEGY")
-            await self._execute_cascade_strategy(initial_capital)
+            # Execute earn wallet cascade strategy
+            self.logger.info("🏦 EXECUTING EARN WALLET LEVERAGE STRATEGY")
+            await self._execute_earn_cascade_strategy(initial_capital)
             
-            self.bot_status = "Active Trading"
-            self.logger.info("✅ REAL TRADING STRATEGY EXECUTED SUCCESSFULLY")
+            self.bot_status = "Active Earn Positions"
+            self.logger.info("✅ EARN WALLET LEVERAGE STRATEGY EXECUTED")
             
         except Exception as e:
-            self.logger.error(f"❌ TRADING FAILED: {e}")
+            self.logger.error(f"❌ EARN TRADING FAILED: {e}")
             self.bot_status = "Error"
             raise
     
-    async def _execute_cascade_strategy(self, capital: float):
-        """Execute REAL cascade leverage strategy"""
+    async def _execute_earn_cascade_strategy(self, capital: float):
+        """Execute earn wallet cascade leverage strategy"""
         try:
             current_capital = capital
             
-            # Sort assets by safety (reverse volatility)
+            # Sort assets by safety
             sorted_assets = sorted(
                 [(k, v) for k, v in self.asset_config.items()],
-                key=lambda x: x[1].volatility_factor  # Lower volatility first
+                key=lambda x: x[1].volatility_factor
             )
             
-            self.logger.info(f"🎯 EXECUTING {self.max_cascade_levels} LEVEL CASCADE")
+            self.logger.info(f"🎯 EXECUTING {self.max_cascade_levels} LEVEL EARN CASCADE")
             
             for level in range(self.max_cascade_levels):
-                if current_capital < 20:  # Minimum $20
+                if current_capital < 20:
                     self.logger.warning(f"Capital too low: ${current_capital}")
                     break
                 
@@ -333,13 +360,18 @@ class MultiAssetLeverageBot:
                 
                 asset_name, asset_config = sorted_assets[level]
                 
+                # Check if asset has flexible product
+                if asset_name not in self.flexible_products_cache:
+                    self.logger.warning(f"No flexible product for {asset_name}, skipping")
+                    continue
+                
                 # Conservative loan calculation
-                max_loan = current_capital * asset_config.ltv_max * 0.90  # 10% safety buffer
+                max_loan = current_capital * asset_config.ltv_max * 0.85  # 15% safety buffer
                 
                 self.logger.info(f"🔄 LEVEL {level + 1}: {asset_name} with ${current_capital:.2f}")
                 
-                # Execute the cascade level with REAL TRADES
-                success = await self._execute_cascade_level(
+                # Execute earn wallet level
+                success = await self._execute_earn_level(
                     level + 1, asset_name, current_capital, max_loan
                 )
                 
@@ -352,19 +384,19 @@ class MultiAssetLeverageBot:
                     break
                     
                 # Wait between levels
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
             
-            self.logger.info(f"🎉 CASCADE COMPLETE - Total leveraged: ${self.leveraged_capital:.2f}")
+            self.logger.info(f"🎉 EARN CASCADE COMPLETE - Total leveraged: ${self.leveraged_capital:.2f}")
                     
         except Exception as e:
-            self.logger.error(f"❌ CASCADE STRATEGY FAILED: {e}")
+            self.logger.error(f"❌ EARN CASCADE FAILED: {e}")
             raise
     
-    async def _execute_cascade_level(self, level: int, asset: str, collateral_amount: float, 
-                                   loan_amount: float) -> bool:
-        """Execute REAL trading for one cascade level"""
+    async def _execute_earn_level(self, level: int, asset: str, collateral_amount: float, 
+                                 loan_amount: float) -> bool:
+        """Execute one level of earn wallet leverage"""
         try:
-            self.logger.info(f"🔥 EXECUTING REAL LEVEL {level}: {asset}")
+            self.logger.info(f"🏦 EXECUTING EARN LEVEL {level}: {asset}")
             self.logger.info(f"💰 Collateral: ${collateral_amount:.2f} | Loan Target: ${loan_amount:.2f}")
             
             # 1. GET CURRENT PRICE
@@ -375,14 +407,13 @@ class MultiAssetLeverageBot:
             
             self.logger.info(f"💲 {asset} price: ${asset_price:.6f}")
             
-            # 2. CALCULATE PURCHASE QUANTITY
+            # 2. BUY ASSET ON SPOT
             symbol = f"{asset}USDT"
             raw_quantity = collateral_amount / asset_price
             quantity = self._format_quantity(symbol, raw_quantity)
             
-            self.logger.info(f"🛒 Buying {quantity} {asset} (${quantity * asset_price:.2f})")
+            self.logger.info(f"🛒 Buying {quantity} {asset} for earn wallet")
             
-            # 3. PLACE REAL BUY ORDER
             buy_order = self.binance_api.place_order(
                 symbol=symbol,
                 side='BUY',
@@ -395,48 +426,44 @@ class MultiAssetLeverageBot:
                 return False
             
             order_id = buy_order.get('orderId', 'N/A')
-            self.logger.info(f"✅ BUY ORDER EXECUTED - ID: {order_id}")
+            self.logger.info(f"✅ BOUGHT {quantity} {asset} - Order: {order_id}")
             
             # Wait for order execution
-            await asyncio.sleep(1)
-            
-            # 4. TRANSFER TO MARGIN ACCOUNT
-            self.logger.info(f"📤 Transferring {quantity} {asset} to margin...")
-            transfer_result = self.binance_api.transfer_to_margin(asset, quantity)
-            
-            if "error" in transfer_result:
-                self.logger.error(f"❌ MARGIN TRANSFER FAILED: {transfer_result['message']}")
-                return False
-            
-            self.logger.info(f"✅ MARGIN TRANSFER SUCCESSFUL")
-            
-            # Wait for transfer
             await asyncio.sleep(2)
             
-            # 5. BORROW USDT AGAINST COLLATERAL
-            self.logger.info(f"💰 Borrowing ${loan_amount:.2f} USDT against {asset}...")
-            borrow_result = self.binance_api.margin_borrow('USDT', loan_amount)
-            
-            if "error" in borrow_result:
-                self.logger.error(f"❌ MARGIN BORROW FAILED: {borrow_result['message']}")
+            # 3. DEPOSIT TO FLEXIBLE SAVINGS (EARN WALLET)
+            flexible_product = self.flexible_products_cache.get(asset)
+            if not flexible_product:
+                self.logger.error(f"❌ No flexible product for {asset}")
                 return False
             
-            self.logger.info(f"✅ BORROWED ${loan_amount:.2f} USDT")
+            product_id = flexible_product['productId']
+            self.logger.info(f"💰 Depositing {quantity} {asset} to earn wallet...")
             
-            # Wait for borrow
-            await asyncio.sleep(2)
+            deposit_result = self.binance_api.purchase_flexible_product(product_id, quantity)
             
-            # 6. TRANSFER BORROWED USDT TO SPOT FOR NEXT LEVEL
-            self.logger.info(f"📥 Transferring borrowed USDT to spot...")
-            transfer_back = self.binance_api.transfer_from_margin('USDT', loan_amount)
+            if "error" in deposit_result:
+                self.logger.error(f"❌ EARN DEPOSIT FAILED: {deposit_result['message']}")
+                return False
             
-            if "error" in transfer_back:
-                self.logger.error(f"❌ USDT TRANSFER FAILED: {transfer_back['message']}")
-                # Not critical - we can continue
-            else:
-                self.logger.info(f"✅ USDT TRANSFERRED TO SPOT")
+            self.logger.info(f"✅ DEPOSITED TO EARN WALLET: {quantity} {asset}")
             
-            # 7. CREATE POSITION RECORD
+            # Wait for deposit to process
+            await asyncio.sleep(3)
+            
+            # 4. APPLY FOR CRYPTO LOAN AGAINST EARN POSITION
+            self.logger.info(f"🏦 Applying for crypto loan: ${loan_amount:.2f} USDT using {asset}")
+            
+            loan_result = self.binance_api.apply_crypto_loan('USDT', asset, loan_amount)
+            
+            if "error" in loan_result:
+                self.logger.error(f"❌ CRYPTO LOAN FAILED: {loan_result['message']}")
+                return False
+            
+            loan_order_id = loan_result.get('orderId', 'N/A')
+            self.logger.info(f"✅ CRYPTO LOAN APPROVED: ${loan_amount:.2f} USDT - Order: {loan_order_id}")
+            
+            # 5. CREATE POSITION RECORD
             current_ltv = loan_amount / (quantity * asset_price)
             
             position = Position(
@@ -448,49 +475,75 @@ class MultiAssetLeverageBot:
                 yield_earned=0,
                 level=level,
                 order_id=order_id,
-                margin_transferred=True,
-                savings_deposited=False
+                earn_product_id=product_id,
+                loan_order_id=loan_order_id
             )
             
             self.positions.append(position)
             
-            self.logger.info(f"🎯 POSITION CREATED: Level {level} | {asset} | LTV: {current_ltv:.1%}")
+            self.logger.info(f"🎯 EARN POSITION CREATED: Level {level} | {asset} | LTV: {current_ltv:.1%}")
             
             return True
             
         except Exception as e:
-            self.logger.error(f"❌ LEVEL {level} EXECUTION FAILED: {e}")
+            self.logger.error(f"❌ EARN LEVEL {level} FAILED: {e}")
             return False
     
     def stop_trading(self):
-        """Stop trading and liquidate positions"""
+        """Stop trading and close all earn positions"""
         try:
-            self.logger.info("🛑 STOPPING TRADING - LIQUIDATING POSITIONS")
+            self.logger.info("🛑 STOPPING EARN TRADING - CLOSING POSITIONS")
             self.is_running = False
-            self.bot_status = "Liquidating"
+            self.bot_status = "Closing Earn Positions"
             
-            # Liquidate all positions in reverse order
+            # Close all positions in reverse order
             for position in reversed(self.positions):
-                self._liquidate_position(position)
+                self._close_earn_position(position)
             
             self.positions.clear()
             self.leveraged_capital = 0
             self.total_yield = 0
             self.bot_status = "Stopped"
             
-            self.logger.info("✅ ALL POSITIONS LIQUIDATED")
+            self.logger.info("✅ ALL EARN POSITIONS CLOSED")
             
         except Exception as e:
-            self.logger.error(f"❌ LIQUIDATION ERROR: {e}")
+            self.logger.error(f"❌ EARN POSITION CLOSING ERROR: {e}")
             self.bot_status = "Error"
     
-    def _liquidate_position(self, position: Position):
-        """Liquidate a single position"""
+    def _close_earn_position(self, position: Position):
+        """Close a single earn position"""
         try:
-            self.logger.info(f"💥 LIQUIDATING: {position.asset} Level {position.level}")
+            self.logger.info(f"💥 CLOSING EARN POSITION: {position.asset} Level {position.level}")
             
-            # 1. Sell the collateral asset
+            # 1. Repay crypto loan
+            if position.loan_order_id:
+                self.logger.info(f"💳 Repaying loan: {position.loan_order_id}")
+                repay_result = self.binance_api.repay_crypto_loan(position.loan_order_id, position.loan_amount)
+                
+                if "error" not in repay_result:
+                    self.logger.info(f"✅ LOAN REPAID: ${position.loan_amount:.2f}")
+                else:
+                    self.logger.error(f"❌ LOAN REPAY FAILED: {repay_result['message']}")
+            
+            # 2. Withdraw from flexible savings
+            if position.earn_product_id:
+                time.sleep(2)  # Wait for repayment
+                self.logger.info(f"💸 Withdrawing from earn wallet: {position.collateral_amount} {position.asset}")
+                
+                withdraw_result = self.binance_api.redeem_flexible_product(
+                    position.earn_product_id, position.collateral_amount
+                )
+                
+                if "error" not in withdraw_result:
+                    self.logger.info(f"✅ WITHDRAWN FROM EARN: {position.collateral_amount} {position.asset}")
+                else:
+                    self.logger.error(f"❌ WITHDRAW FAILED: {withdraw_result['message']}")
+            
+            # 3. Sell the asset
+            time.sleep(2)  # Wait for withdrawal
             symbol = f"{position.asset}USDT"
+            
             sell_order = self.binance_api.place_order(
                 symbol=symbol,
                 side='SELL',
@@ -500,20 +553,11 @@ class MultiAssetLeverageBot:
             
             if "error" not in sell_order:
                 self.logger.info(f"✅ SOLD {position.asset} - Order: {sell_order.get('orderId')}")
-                
-                # 2. Repay the loan
-                time.sleep(2)  # Wait for sell order
-                repay_result = self.binance_api.margin_repay('USDT', position.loan_amount)
-                
-                if "error" not in repay_result:
-                    self.logger.info(f"✅ REPAID ${position.loan_amount:.2f} USDT")
-                else:
-                    self.logger.error(f"❌ REPAY FAILED: {repay_result['message']}")
             else:
                 self.logger.error(f"❌ SELL FAILED: {sell_order['message']}")
                 
         except Exception as e:
-            self.logger.error(f"❌ LIQUIDATION FAILED: {e}")
+            self.logger.error(f"❌ EARN POSITION CLOSE FAILED: {e}")
     
     def get_portfolio_status(self) -> Dict:
         """Get current portfolio status"""
@@ -555,7 +599,8 @@ class MultiAssetLeverageBot:
                     'loan': pos.loan_amount,
                     'ltv': pos.current_ltv,
                     'usd_value': pos.collateral_amount * self._get_asset_price(pos.asset),
-                    'order_id': pos.order_id
+                    'order_id': pos.order_id,
+                    'loan_order_id': pos.loan_order_id
                 }
                 for pos in self.positions
             ]
@@ -591,6 +636,31 @@ class MultiAssetLeverageBot:
                             'usd_value': usd_value
                         }
             
+            # Add flexible savings positions
+            try:
+                flexible_positions = self.binance_api.get_flexible_positions()
+                if flexible_positions and isinstance(flexible_positions, list):
+                    for position in flexible_positions:
+                        asset = position.get('asset', '')
+                        amount = float(position.get('totalAmount', 0))
+                        
+                        if asset and amount > 0.001:
+                            price = self._get_asset_price(asset)
+                            if price > 0:
+                                usd_value = amount * price
+                                total_usd += usd_value
+                                
+                                if asset not in balances:
+                                    balances[asset] = {
+                                        'spot_free': 0, 'spot_locked': 0, 'spot_total': 0,
+                                        'price': price, 'usd_value': 0
+                                    }
+                                
+                                balances[asset]['earn_amount'] = amount
+                                balances[asset]['usd_value'] += usd_value
+            except Exception as e:
+                self.logger.error(f"Error getting flexible positions: {e}")
+            
             return {
                 'total_usd_value': total_usd,
                 'balances': balances,
@@ -610,14 +680,14 @@ HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Multi-Asset Leverage Bot - REAL TRADING EXECUTION</title>
+    <title>Earn Wallet Leverage Bot - REAL LEVERAGED POSITIONS</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { font-family: Arial, sans-serif; margin: 0; background: #f5f5f5; }
         
-        .trading-banner {
-            background: linear-gradient(135deg, #dc3545, #fd7e14);
+        .earn-banner {
+            background: linear-gradient(135deg, #28a745, #20c997);
             color: white;
             padding: 15px 20px;
             text-align: center;
@@ -628,7 +698,7 @@ HTML_TEMPLATE = '''
         
         @keyframes pulse {
             0%, 100% { opacity: 1; }
-            50% { opacity: 0.9; }
+            50% { opacity: 0.95; }
         }
         
         .container { 
@@ -641,7 +711,7 @@ HTML_TEMPLATE = '''
         }
         
         .header { text-align: center; color: #333; margin-bottom: 30px; }
-        .controls { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 2px solid #dc3545; }
+        .controls { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 2px solid #28a745; }
         .status { display: flex; justify-content: space-between; margin-bottom: 20px; }
         .metric { background: #007bff; color: white; padding: 15px; border-radius: 8px; text-align: center; flex: 1; margin: 0 5px; }
         .metric.yield { background: #28a745; }
@@ -668,13 +738,26 @@ HTML_TEMPLATE = '''
         .status-executing { background: #ffc107; color: #333; }
         .status-error { background: #dc3545; }
         
-        .trading-warning {
-            background: #fff3cd;
-            border: 1px solid #ffeaa7;
+        .earn-strategy {
+            background: linear-gradient(135deg, #20c997, #17a2b8);
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+        
+        .strategy-steps {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .strategy-step {
+            background: rgba(255,255,255,0.1);
             padding: 15px;
             border-radius: 8px;
-            margin: 10px 0;
-            font-weight: bold;
+            text-align: center;
         }
         
         .balances-section {
@@ -713,25 +796,48 @@ HTML_TEMPLATE = '''
     </style>
 </head>
 <body>
-    <div class="trading-banner">
-        🔥 REAL TRADING EXECUTION - ACTUAL ORDERS & POSITIONS
+    <div class="earn-banner">
+        🏦 EARN WALLET LEVERAGE - REAL LEVERAGED POSITIONS IN BINANCE EARN
     </div>
 
     <div class="container">
         <div class="header">
-            <h1>🔥 Multi-Asset Leverage Bot - REAL EXECUTION</h1>
-            <p><strong>Executes Real Trades, Orders, Borrowing & Lending</strong></p>
+            <h1>🏦 Earn Wallet Leverage Bot</h1>
+            <p><strong>Creates Leveraged Positions Using Binance Earn Wallet</strong></p>
+        </div>
+        
+        <div class="earn-strategy">
+            <h3>🎯 Earn Wallet Leverage Strategy</h3>
+            <p>This bot creates leveraged positions by depositing assets into Binance Earn and borrowing against them:</p>
+            <div class="strategy-steps">
+                <div class="strategy-step">
+                    <strong>1. Buy Asset</strong><br>
+                    <small>Purchase crypto on spot market</small>
+                </div>
+                <div class="strategy-step">
+                    <strong>2. Deposit to Earn</strong><br>
+                    <small>Move to flexible savings (earn wallet)</small>
+                </div>
+                <div class="strategy-step">
+                    <strong>3. Borrow Against</strong><br>
+                    <small>Take crypto loan using earn position</small>
+                </div>
+                <div class="strategy-step">
+                    <strong>4. Cascade Repeat</strong><br>
+                    <small>Use borrowed funds for next level</small>
+                </div>
+            </div>
         </div>
         
         <div class="balances-section">
-            <h3>💼 Live Account Status</h3>
+            <h3>💼 Account Overview</h3>
             <div class="balance-grid">
                 <div class="balance-item">
                     <div class="balance-label">Available USDT</div>
                     <div class="balance-value">$<span id="available-usdt">0.00</span></div>
                 </div>
                 <div class="balance-item">
-                    <div class="balance-label">Active Positions</div>
+                    <div class="balance-label">Earn Positions</div>
                     <div class="balance-value"><span id="position-count">0</span></div>
                 </div>
                 <div class="balance-item">
@@ -739,23 +845,20 @@ HTML_TEMPLATE = '''
                     <div class="balance-value">$<span id="total-loans">0.00</span></div>
                 </div>
                 <div class="balance-item">
-                    <div class="balance-label">Net Portfolio</div>
+                    <div class="balance-label">Net Value</div>
                     <div class="balance-value">$<span id="net-portfolio">0.00</span></div>
                 </div>
             </div>
         </div>
         
         <div class="controls">
-            <h3>🔥 Real Trading Execution</h3>
-            <div class="trading-warning">
-                ⚠️ WARNING: This will execute REAL trades with REAL money. Orders will be placed immediately.
-            </div>
+            <h3>🏦 Earn Wallet Leverage Control</h3>
             <div class="input-group">
                 <label for="capital">Capital to Deploy (USD):</label>
                 <input type="number" id="capital" value="50" min="20" step="10">
             </div>
-            <button class="btn btn-danger" onclick="startRealTrading()">🔥 EXECUTE REAL TRADING</button>
-            <button class="btn btn-danger" onclick="stopTrading()">🛑 LIQUIDATE ALL POSITIONS</button>
+            <button class="btn btn-success" onclick="startEarnLeverage()">🏦 START EARN LEVERAGE</button>
+            <button class="btn btn-danger" onclick="stopTrading()">🛑 CLOSE ALL POSITIONS</button>
             <button class="btn btn-primary" onclick="updateStatus()">🔄 Refresh Status</button>
         </div>
         
@@ -783,22 +886,22 @@ HTML_TEMPLATE = '''
         </div>
         
         <div>
-            <h3>📊 Live Trading Positions</h3>
+            <h3>📊 Earn Wallet Leverage Positions</h3>
             <table class="positions-table" id="positions-table">
                 <thead>
                     <tr>
                         <th>Level</th>
                         <th>Asset</th>
-                        <th>Collateral</th>
+                        <th>Earn Amount</th>
                         <th>Loan (USDT)</th>
                         <th>LTV</th>
                         <th>USD Value</th>
-                        <th>Order ID</th>
+                        <th>Loan Order</th>
                     </tr>
                 </thead>
                 <tbody id="positions-body">
                     <tr>
-                        <td colspan="7" style="text-align: center; color: #666;">No active positions</td>
+                        <td colspan="7" style="text-align: center; color: #666;">No earn positions</td>
                     </tr>
                 </tbody>
             </table>
@@ -808,19 +911,10 @@ HTML_TEMPLATE = '''
     <script>
         let isTrading = false;
         
-        async function startRealTrading() {
+        async function startEarnLeverage() {
             if (isTrading) return;
             
             const capital = document.getElementById('capital').value;
-            
-            if (!confirm(`EXECUTE REAL TRADING with $${capital}?\\n\\nThis will:\\n- Place real market orders\\n- Borrow real money\\n- Create leveraged positions\\n\\nContinue?`)) {
-                return;
-            }
-            
-            if (!confirm('FINAL CONFIRMATION:\\n\\nThis is LIVE TRADING with REAL MONEY.\\nReal orders will be executed immediately.\\n\\nProceed?')) {
-                return;
-            }
-            
             isTrading = true;
             
             try {
@@ -833,27 +927,23 @@ HTML_TEMPLATE = '''
                 const result = await response.json();
                 
                 if (result.success) {
-                    alert('✅ REAL TRADING STARTED! Check positions table for live updates.');
+                    alert('✅ EARN LEVERAGE STARTED! Creating leveraged positions...');
                     setTimeout(updateStatus, 2000);
                 } else {
-                    alert(`❌ Trading failed: ${result.error}`);
+                    alert(`❌ Failed: ${result.error}`);
                 }
             } catch (error) {
-                alert(`❌ Network error: ${error.message}`);
+                alert(`❌ Error: ${error.message}`);
             } finally {
                 isTrading = false;
             }
         }
         
         async function stopTrading() {
-            if (!confirm('LIQUIDATE ALL POSITIONS?\\n\\nThis will sell all assets and repay all loans.')) {
-                return;
-            }
-            
             try {
                 const response = await fetch('/stop', { method: 'POST' });
                 const result = await response.json();
-                alert('🛑 All positions liquidated');
+                alert('🛑 Earn positions closed');
                 setTimeout(updateStatus, 2000);
             } catch (error) {
                 alert(`❌ Error: ${error.message}`);
@@ -882,13 +972,12 @@ HTML_TEMPLATE = '''
                 statusElement.textContent = statusData.bot_status;
                 statusElement.className = 'status-indicator status-' + statusData.bot_status.toLowerCase().replace(' ', '-');
                 
-                // Update available USDT
+                // Update balances
                 const usdtBalance = balanceData.balances['USDT'];
                 if (usdtBalance) {
                     document.getElementById('available-usdt').textContent = usdtBalance.spot_free.toLocaleString(undefined, {minimumFractionDigits: 2});
                 }
                 
-                // Update total loans
                 document.getElementById('total-loans').textContent = statusData.leveraged_capital.toLocaleString();
                 document.getElementById('net-portfolio').textContent = statusData.net_portfolio_value.toLocaleString();
                 
@@ -897,7 +986,7 @@ HTML_TEMPLATE = '''
                 tbody.innerHTML = '';
                 
                 if (statusData.positions.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #666;">No active positions</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #666;">No earn positions</td></tr>';
                 } else {
                     statusData.positions.forEach(pos => {
                         const row = document.createElement('tr');
@@ -908,7 +997,7 @@ HTML_TEMPLATE = '''
                             <td>$${pos.loan.toLocaleString()}</td>
                             <td><strong>${(pos.ltv * 100).toFixed(1)}%</strong></td>
                             <td>$${pos.usd_value.toLocaleString()}</td>
-                            <td><code>${pos.order_id || 'N/A'}</code></td>
+                            <td><code>${pos.loan_order_id || 'N/A'}</code></td>
                         `;
                         tbody.appendChild(row);
                     });
@@ -918,8 +1007,8 @@ HTML_TEMPLATE = '''
             }
         }
         
-        // Auto-refresh every 10 seconds
-        setInterval(updateStatus, 10000);
+        // Auto-refresh every 15 seconds
+        setInterval(updateStatus, 15000);
         
         // Initial load
         updateStatus();
@@ -947,16 +1036,16 @@ def start_trading():
             return jsonify({'success': False, 'error': 'API credentials not configured'})
         
         # Create new bot instance
-        bot = MultiAssetLeverageBot(api_key, api_secret, testnet)
+        bot = EarnWalletLeverageBot(api_key, api_secret, testnet)
         
-        # Start real trading in background
+        # Start earn leverage in background
         def start_async():
             asyncio.run(bot.start_trading(capital))
         
         thread = threading.Thread(target=start_async)
         thread.start()
         
-        return jsonify({'success': True, 'message': 'Real trading strategy executing'})
+        return jsonify({'success': True, 'message': 'Earn wallet leverage executing'})
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -967,7 +1056,7 @@ def stop_trading():
     try:
         if bot:
             bot.stop_trading()
-        return jsonify({'success': True, 'message': 'All positions liquidated'})
+        return jsonify({'success': True, 'message': 'Earn positions closed'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
@@ -1001,7 +1090,7 @@ def get_balances():
         if not api_key or not api_secret:
             return jsonify({'total_usd_value': 0, 'balances': {}, 'error': 'No API credentials'})
         
-        bot = MultiAssetLeverageBot(api_key, api_secret, testnet)
+        bot = EarnWalletLeverageBot(api_key, api_secret, testnet)
     
     return jsonify(bot.get_account_balances())
 
