@@ -1,191 +1,152 @@
-# Multi-Asset Leverage Bot
+# Multi-Asset Leverage Bot - LIVE TRADING
 
-🚀 **Bot de Apalancamiento Multi-Activo con Estrategia de Cascada**
+🚀 **Real Money Trading Bot - Advanced Cascade Leverage Strategy**
 
-Aplicación web que implementa una estrategia automatizada de apalancamiento en cascada utilizando múltiples activos de Binance para maximizar el rendimiento del capital.
+Production-ready application that executes real trades on Binance using automated cascade leverage strategy to maximize capital efficiency.
 
-## 🎯 Estrategia
+## 🎯 Live Trading Strategy
 
-### Concepto Principal
-- **Apalancamiento en Cascada**: Cada préstamo genera nuevo colateral para el siguiente nivel
-- **Multi-Activo**: Utiliza 15+ activos organizados en 4 tiers de liquidez
-- **Delta-Neutral**: Mantiene exposición mínima a movimientos de precio
-- **Carry Lending**: Genera rendimientos por diferencias entre yields y costos de préstamo
+### Concept Principal
+- **Cascade Leverage**: Each loan generates new collateral for the next level
+- **Multi-Asset**: Uses 25+ assets organized in 4 liquidity tiers
+- **Real Execution**: Places actual trades with real money
+- **Risk Management**: Automated liquidation and monitoring
 
-### Estructura de Tiers
-- **Tier 1**: BTC, ETH, BNB (Alta liquidez, LTV 60-70%)
-- **Tier 2**: AVAX, MATIC, SOL, ADA (Media liquidez, LTV 48-55%)
-- **Tier 3**: DOT, ATOM, NEAR, FTM (Oportunidades, LTV 38-45%)
-- **Tier 4**: LUNA, OSMO, JUNO (Alto rendimiento, LTV 25-35%)
+### Asset Tiers
+- **Tier 1**: BTC, ETH, BNB, USDT, USDC (High liquidity, LTV 65-85%)
+- **Tier 2**: CVX, ZRX, ETHFI, HIFI (Medium liquidity, LTV 40-55%)
+- **Tier 3**: ONT, LIT, LSK, SKL, GLMR, RIF, FLM, STPT, DUSK (LTV 30-45%)
+- **Tier 4**: BNX, BOME, OXT, RONIN, WIF, XVG (High yield, LTV 22-35%)
 
-## 📊 Rendimiento Proyectado
+## 📊 Performance Targets
 
-Con **$10,000 iniciales**:
-- Capital apalancado total: **~$24,000**
-- Apalancamiento efectivo: **2.4x**
-- ROI estimado: **13-15% anual**
-- Rendimiento absoluto: **$1,300-1,500/año**
+With **$1,000 initial capital**:
+- **Total leveraged capital**: ~$2,400
+- **Effective leverage**: 2.4x
+- **Target ROI**: 13-15% annually
+- **Expected returns**: $130-150/year
 
-## 🛠️ Características
+## 🛠️ Live Trading Features
 
-### ✅ Implementado
-- [x] Sistema multi-activo con 15 criptomonedas
-- [x] Apalancamiento en cascada de hasta 5 niveles
-- [x] Dashboard web interactivo
-- [x] Simulación en tiempo real
-- [x] Gestión de riesgo automatizada
-- [x] Configuración por tiers de liquidez
+### ✅ Production Ready
+- [x] **Real Binance API Integration**
+- [x] **Actual order execution** with market prices
+- [x] **Margin trading** and borrowing
+- [x] **Flexible savings** for additional yield
+- [x] **Emergency liquidation** system
+- [x] **Real-time monitoring** every 30 seconds
+- [x] **Position tracking** with order IDs
+- [x] **Risk management** with LTV monitoring
 
-### 🔄 Modo Simulación
-- Actualmente funciona en **modo simulación** para demostrar la estrategia
-- No requiere API keys reales de Binance
-- Calcula rendimientos basados en datos históricos
+### 🚀 Deployment
 
-### 🔮 Próximas Características
-- [ ] Integración real con Binance API
-- [ ] Monitoreo en tiempo real
-- [ ] Alertas automáticas
-- [ ] Rebalanceo automático
-- [ ] Sistema de stop-loss/take-profit
-
-## 🚀 Deploy en Railway
-
-### 1. Preparar Repositorio
-```bash
-git clone <tu-repo>
-cd multi-asset-leverage-bot
+**Required Environment Variables:**
+```
+BINANCE_API_KEY=your_real_api_key
+BINANCE_API_SECRET=your_real_secret
+BINANCE_TESTNET=false
+FLASK_ENV=production
 ```
 
-### 2. Archivos Incluidos
-```
-/
-├── main.py              # Aplicación principal
-├── requirements.txt     # Dependencias Python
-├── Procfile            # Comando de inicio
-├── railway.json        # Configuración Railway
-└── README.md           # Este archivo
-```
+**Deploy to Railway:**
+1. Set environment variables in Railway dashboard
+2. Push code to repository
+3. Railway auto-deploys using Dockerfile
+4. Access dashboard at your Railway URL
 
-### 3. Deploy
-1. Conecta tu repositorio a Railway
-2. Railway detectará automáticamente la aplicación Python
-3. Se desplegará usando Gunicorn
-4. La app estará disponible en tu dominio Railway
+## 🎯 How It Works
 
-### 4. Variables de Entorno (Opcionales)
-```
-BINANCE_API_KEY=tu_api_key_aqui
-BINANCE_API_SECRET=tu_api_secret_aqui
-```
+### Real Trading Process
+1. **Account Verification**: Checks Binance balances and permissions
+2. **Asset Purchase**: Buys crypto with USDT using market orders
+3. **Margin Transfer**: Moves assets to margin account
+4. **Borrowing**: Takes USDT loans against collateral
+5. **Cascade Execution**: Repeats process up to 5 levels
+6. **Yield Optimization**: Deposits assets in flexible savings
 
-## 🖥️ Uso de la Aplicación
+### Risk Controls
+- **Maximum LTV**: 85% emergency liquidation
+- **Position Monitoring**: Real-time price tracking
+- **Auto-liquidation**: Automatic position closure
+- **Balance Verification**: Insufficient fund protection
 
-### Dashboard Principal
-- **Control del Bot**: Iniciar/detener con capital personalizado
-- **Métricas en Tiempo Real**: Capital, apalancamiento, ROI, posiciones
-- **Configuración de Activos**: Visualización de parámetros por tier
-- **Tabla de Posiciones**: Estado detallado de cada posición activa
+## 💼 Dashboard Features
 
-### Controles Disponibles
-1. **Iniciar Bot**: Especifica capital inicial y ejecuta estrategia
-2. **Detener Bot**: Para todas las operaciones
-3. **Actualizar Estado**: Refresca métricas manualmente
-4. **Auto-actualización**: Cada 10 segundos automáticamente
+### Account Overview
+- **Total portfolio value** in real-time
+- **Available USDT** balance
+- **Active trading positions**
+- **Total outstanding loans**
 
-## ⚠️ Advertencias Importantes
+### Live Controls
+- **START LIVE TRADING**: Execute real trades
+- **STOP & LIQUIDATE ALL**: Emergency position closure
+- **Real-time status** updates every 15 seconds
 
-### Riesgos del Trading con Apalancamiento
-- **Pérdidas amplificadas**: El apalancamiento puede multiplicar tanto ganancias como pérdidas
-- **Liquidación forzosa**: Si el LTV supera los límites, las posiciones pueden ser liquidadas
-- **Volatilidad del mercado**: Los precios de criptomonedas son altamente volátiles
-- **Riesgo de contraparte**: Dependencia de la estabilidad de Binance
-- **Riesgo técnico**: Fallos en APIs o conectividad pueden afectar operaciones
+### Position Tracking
+- **Level-by-level** position details
+- **Collateral amounts** and loan values
+- **Current LTV ratios**
+- **Real order IDs** from Binance
 
-### Recomendaciones de Seguridad
-1. **Comenzar pequeño**: Prueba con cantidades mínimas
-2. **Usar testnet**: Siempre probar en entorno de pruebas primero
-3. **Monitoreo constante**: Supervisar posiciones regularmente
-4. **Límites de riesgo**: No invertir más de lo que puedes permitirte perder
-5. **Educación continua**: Entender completamente la estrategia antes de usar
+## 🔐 Security Requirements
 
-## 🔧 Desarrollo y Personalización
+### Binance API Setup
+**Required Permissions:**
+- ✅ Enable Reading
+- ✅ Enable Spot & Margin Trading  
+- ✅ Enable Margin
+- ✅ Enable Savings
 
-### Estructura del Código
-```python
-# Configuración de activos
-asset_config = {
-    'BTC': AssetConfig('BTC', ltv_max=0.70, yield_rate=0.05, ...),
-    # ... más activos
-}
+**Security Settings:**
+- Whitelist your deployment server IP
+- Use strong API credentials
+- Never share API keys
 
-# Parámetros de estrategia
-max_cascade_levels = 5
-target_total_leverage = 2.4
-emergency_ltv = 0.85
-```
+### Minimum Requirements
+- **$50+ USDT** in spot wallet
+- **Margin trading** enabled on Binance
+- **Identity verification** completed
+- **API permissions** properly configured
 
-### Personalizar Estrategia
-- **Modificar tiers**: Ajustar `liquidity_tier` en configuración
-- **Cambiar LTV**: Modificar `ltv_max` para controlar riesgo
-- **Ajustar yields**: Actualizar `yield_rate` y `loan_rate` según mercado
-- **Límites de riesgo**: Modificar `emergency_ltv` y otros parámetros
+## ⚡ Real Trading Workflow
 
-### API Endpoints
-- `GET /` - Dashboard principal
-- `POST /start` - Iniciar bot con capital
-- `POST /stop` - Detener bot
-- `GET /status` - Estado actual del portfolio
-- `GET /assets` - Configuración de activos
+1. **Initialize**: Bot connects to Binance and verifies account
+2. **Capital Deployment**: Executes cascade strategy with real orders
+3. **Monitoring**: Continuously tracks positions and market prices
+4. **Risk Management**: Automatic liquidation if LTV exceeds limits
+5. **Yield Generation**: Earnings from lending spreads and flexible savings
 
-## 📈 Métricas y Análisis
+## 🛡️ Risk Management
 
-### Indicadores Clave
-- **Capital Total**: Inversión inicial
-- **Capital Apalancado**: Total de fondos en operación
-- **Ratio de Apalancamiento**: Multiplicador efectivo
-- **ROI Estimado**: Rendimiento anual proyectado
-- **Posiciones Activas**: Número de operaciones abiertas
+### Automated Protection
+- **LTV Monitoring**: Continuous ratio tracking
+- **Emergency Stops**: Automatic liquidation at 85% LTV
+- **Position Limits**: Maximum 5 cascade levels
+- **Balance Checks**: Prevents overdeployment
 
-### Cálculo de Rendimiento
-```python
-net_yield = yield_rate - loan_rate
-annual_return = sum(net_yield * loan_amount for each position)
-roi_percentage = (annual_return / initial_capital) * 100
-```
+### Manual Controls
+- **Instant Stop**: Emergency liquidation button
+- **Real-time Dashboard**: Live position monitoring
+- **Order Tracking**: Full audit trail with Binance order IDs
 
-## 🛡️ Gestión de Riesgo
+## 📈 Live Performance Metrics
 
-### Sistemas de Protección
-- **LTV Monitoring**: Vigilancia continua de ratios de préstamo
-- **Emergency Liquidation**: Cierre automático si LTV > 85%
-- **Tier-based Limits**: Límites específicos por nivel de liquidez
-- **Diversification**: Distribución automática entre múltiples activos
+The dashboard shows:
+- **Real portfolio value** from Binance balances
+- **Actual loan amounts** and interest rates
+- **Live LTV ratios** for each position
+- **Current yield estimates** based on real rates
+- **Order execution** status and timing
 
-### Alertas Automáticas
-- LTV > 75%: Reducción de posición
-- LTV > 80%: Liquidación parcial
-- LTV > 85%: Liquidación de emergencia
-- Spread < 1%: Cierre de posición no rentable
+## 🚨 Important Notes
 
-## 📞 Soporte y Contacto
-
-### Recursos Adicionales
-- [Documentación Binance API](https://binance-docs.github.io/apidocs/)
-- [Railway Documentation](https://docs.railway.app/)
-- [Gestión de Riesgo en Trading](https://www.investopedia.com/articles/trading/09/risk-management.asp)
-
-### Contribuciones
-Las contribuciones son bienvenidas! Por favor:
-1. Fork el repositorio
-2. Crea una rama para tu feature
-3. Commit tus cambios
-4. Push a la rama
-5. Abre un Pull Request
-
-## 📄 Licencia
-
-Este proyecto es para fines educativos. Úsalo bajo tu propia responsabilidad.
+This bot executes **real trades with real money**:
+- Start with small amounts to test
+- Monitor positions actively
+- Understand liquidation risks
+- Only invest what you can afford to lose
 
 ---
 
-**⚡ Desarrollado con Railway | 🚀 Optimizado para rendimiento máximo**
+**⚡ Live Trading Ready | 🔴 Real Money Operations**

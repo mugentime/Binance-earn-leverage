@@ -30,3 +30,7 @@ coverage.xml
 config.py
 secrets.json
 api_keys.txt
+server.js
+nixpacks.toml
+package.json
+package-lock.json
