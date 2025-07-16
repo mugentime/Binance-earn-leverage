@@ -142,8 +142,15 @@ class MultiAssetLeverageBot:
         self.best_earn_pair = None
         self.last_pair_update = datetime.now() - timedelta(hours=1)
         
-        # Start background pair analysis
+        # Wallet and balance tracking
+        self.current_balances = {}
+        self.current_loans = {}
+        self.total_wallet_usd = 0
+        self.last_balance_update = datetime.now() - timedelta(hours=1)
+        
+        # Start background threads
         self._start_pair_analysis_thread()
+        self._start_balance_monitoring_thread()
     
     def _initialize_asset_config(self) -> Dict[str, AssetConfig]:
         """Initialize asset configuration with real data when possible"""
@@ -233,6 +240,171 @@ class MultiAssetLeverageBot:
         
         thread = threading.Thread(target=analyze_pairs, daemon=True)
         thread.start()
+    
+    def _start_balance_monitoring_thread(self):
+        """Start background thread for balance monitoring"""
+        def monitor_balances():
+            while True:
+                try:
+                    if datetime.now() - self.last_balance_update > timedelta(minutes=2):
+                        self._update_wallet_balances()
+                        self.last_balance_update = datetime.now()
+                    time.sleep(120)  # Check every 2 minutes
+                except Exception as e:
+                    self.logger.error(f"Error in balance monitoring thread: {e}")
+                    time.sleep(300)  # Wait 5 minutes on error
+        
+        thread = threading.Thread(target=monitor_balances, daemon=True)
+        thread.start()
+    
+    def _update_wallet_balances(self):
+        """Update current wallet balances and loans"""
+        if not self.binance_api:
+            # Mock data for demo mode
+            self._generate_mock_balances()
+            return
+            
+        try:
+            # Get spot account balances
+            account_info = self.binance_api.get_account_info()
+            spot_balances = {}
+            
+            if 'balances' in account_info:
+                for balance in account_info['balances']:
+                    asset = balance['asset']
+                    free = float(balance['free'])
+                    locked = float(balance['locked'])
+                    total = free + locked
+                    if total > 0:
+                        spot_balances[asset] = {
+                            'free': free,
+                            'locked': locked,
+                            'total': total
+                        }
+            
+            # Get earn balances
+            earn_balances = self.binance_api.get_earn_balances()
+            earn_positions = {}
+            
+            for earn_pos in earn_balances:
+                asset = earn_pos.get('asset', '')
+                amount = float(earn_pos.get('totalAmount', 0))
+                if amount > 0:
+                    earn_positions[asset] = {
+                        'amount': amount,
+                        'interest': float(earn_pos.get('totalInterest', 0)),
+                        'type': earn_pos.get('productName', 'Flexible')
+                    }
+            
+            # Get margin loans
+            margin_account = self.binance_api.get_margin_account()
+            margin_loans = {}
+            
+            if 'userAssets' in margin_account:
+                for asset_info in margin_account['userAssets']:
+                    asset = asset_info['asset']
+                    borrowed = float(asset_info.get('borrowed', 0))
+                    interest = float(asset_info.get('interest', 0))
+                    if borrowed > 0:
+                        margin_loans[asset] = {
+                            'borrowed': borrowed,
+                            'interest': interest,
+                            'net_asset': float(asset_info.get('netAsset', 0))
+                        }
+            
+            # Calculate total USD value
+            prices = self.binance_api.get_spot_prices()
+            price_map = {p['symbol']: float(p['price']) for p in prices}
+            
+            total_usd_value = 0
+            
+            # Combine all balances
+            all_balances = {}
+            
+            # Add spot balances
+            for asset, balance in spot_balances.items():
+                if asset not in all_balances:
+                    all_balances[asset] = {'spot': 0, 'earn': 0, 'loan': 0}
+                all_balances[asset]['spot'] = balance['total']
+            
+            # Add earn balances
+            for asset, earn in earn_positions.items():
+                if asset not in all_balances:
+                    all_balances[asset] = {'spot': 0, 'earn': 0, 'loan': 0}
+                all_balances[asset]['earn'] = earn['amount']
+            
+            # Add loan balances (negative)
+            for asset, loan in margin_loans.items():
+                if asset not in all_balances:
+                    all_balances[asset] = {'spot': 0, 'earn': 0, 'loan': 0}
+                all_balances[asset]['loan'] = -loan['borrowed']  # Negative for loans
+            
+            # Calculate USD values
+            for asset, balances in all_balances.items():
+                total_asset_amount = balances['spot'] + balances['earn'] + balances['loan']
+                
+                # Get USD price
+                usd_price = 0
+                if asset == 'USDT' or asset == 'USDC':
+                    usd_price = 1.0
+                else:
+                    # Try different symbol combinations
+                    for suffix in ['USDT', 'BUSD', 'USDC']:
+                        symbol = f"{asset}{suffix}"
+                        if symbol in price_map:
+                            usd_price = price_map[symbol]
+                            break
+                
+                usd_value = total_asset_amount * usd_price
+                total_usd_value += usd_value
+                
+                balances['usd_value'] = usd_value
+                balances['price'] = usd_price
+            
+            # Update instance variables
+            self.current_balances = all_balances
+            self.current_loans = margin_loans
+            self.total_wallet_usd = total_usd_value
+            
+            self.logger.info(f"Wallet balances updated. Total USD value: ${total_usd_value:.2f}")
+            
+        except Exception as e:
+            self.logger.error(f"Error updating wallet balances: {e}")
+            self._generate_mock_balances()
+    
+    def _generate_mock_balances(self):
+        """Generate mock balances for demo mode"""
+        # Mock some realistic balances
+        mock_balances = {
+            'BTC': {'spot': 0.05, 'earn': 0.02, 'loan': 0, 'usd_value': 2100, 'price': 30000},
+            'ETH': {'spot': 0.8, 'earn': 0.5, 'loan': 0, 'usd_value': 2600, 'price': 2000},
+            'BNB': {'spot': 2.5, 'earn': 1.2, 'loan': 0, 'usd_value': 1110, 'price': 300},
+            'USDT': {'spot': 500, 'earn': 800, 'loan': -200, 'usd_value': 1100, 'price': 1},
+            'USDC': {'spot': 300, 'earn': 0, 'loan': 0, 'usd_value': 300, 'price': 1},
+        }
+        
+        self.current_balances = mock_balances
+        self.total_wallet_usd = sum(b['usd_value'] for b in mock_balances.values())
+        self.current_loans = {'USDT': {'borrowed': 200, 'interest': 1.5}}
+    
+    def get_wallet_summary(self) -> Dict:
+        """Get comprehensive wallet summary"""
+        total_spot = sum(b.get('spot', 0) * b.get('price', 0) for b in self.current_balances.values())
+        total_earn = sum(b.get('earn', 0) * b.get('price', 0) for b in self.current_balances.values())
+        total_loans = sum(abs(b.get('loan', 0)) * b.get('price', 0) for b in self.current_balances.values())
+        
+        return {
+            'total_wallet_usd': self.total_wallet_usd,
+            'total_spot_usd': total_spot,
+            'total_earn_usd': total_earn,
+            'total_loans_usd': total_loans,
+            'net_worth_usd': self.total_wallet_usd,
+            'asset_count': len([a for a, b in self.current_balances.items() if b.get('spot', 0) + b.get('earn', 0) > 0]),
+            'loan_count': len([a for a, b in self.current_balances.items() if b.get('loan', 0) < 0]),
+            'last_update': self.last_balance_update.strftime('%Y-%m-%d %H:%M:%S'),
+            'balances': self.current_balances,
+            'loans': self.current_loans
+        }
     
     def _analyze_best_earn_pair(self):
         """Analyze and find the best collateral/borrow pair from all available assets"""
@@ -363,7 +535,7 @@ class MultiAssetLeverageBot:
         collateral_assets = [asset for asset in sorted_assets if asset[0] not in ['USDT', 'USDC']]
         
         for level in range(min(self.max_cascade_levels, len(collateral_assets))):
-            if current_capital < 100:
+            if current_capital < 10:  # Minimum $10 USD
                 break
             
             asset_name, asset_config = collateral_assets[level]
@@ -594,6 +766,68 @@ HTML_TEMPLATE = '''
         .status-running { background: #28a745; }
         .status-stopped { background: #dc3545; }
         .status-error { background: #ffc107; color: #333; }
+        .wallet-summary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        
+        .wallet-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .wallet-metric {
+            background: rgba(255,255,255,0.1);
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            backdrop-filter: blur(10px);
+        }
+        
+        .wallet-metric-label {
+            font-size: 12px;
+            opacity: 0.9;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .wallet-metric-value {
+            font-size: 18px;
+            font-weight: bold;
+        }
+        
+        .balances-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .balances-table th,
+        .balances-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        .balances-table th {
+            background: rgba(255,255,255,0.1);
+            font-weight: bold;
+        }
+        
+        .balance-positive { color: #4CAF50; }
+        .balance-negative { color: #f44336; }
+        .balance-neutral { color: #fff; }
+        
         .asset-config { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px; margin: 20px 0; }
         .asset-card { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #007bff; }
         .tier-1 { border-left-color: #28a745; }
@@ -640,11 +874,60 @@ HTML_TEMPLATE = '''
             <p>Advanced Cascade Leverage Strategy with 24 Premium Assets & Real-Time Market Analysis</p>
         </div>
         
+        <!-- Wallet Summary Section -->
+        <div class="wallet-summary">
+            <h3>💼 Your Binance Wallet Overview</h3>
+            <div class="wallet-metrics">
+                <div class="wallet-metric">
+                    <div class="wallet-metric-label">Total Net Worth</div>
+                    <div class="wallet-metric-value">$<span id="total-wallet">0.00</span></div>
+                </div>
+                <div class="wallet-metric">
+                    <div class="wallet-metric-label">Spot Balance</div>
+                    <div class="wallet-metric-value">$<span id="spot-balance">0.00</span></div>
+                </div>
+                <div class="wallet-metric">
+                    <div class="wallet-metric-label">Earn Balance</div>
+                    <div class="wallet-metric-value">$<span id="earn-balance">0.00</span></div>
+                </div>
+                <div class="wallet-metric">
+                    <div class="wallet-metric-label">Active Loans</div>
+                    <div class="wallet-metric-value">$<span id="loan-balance">0.00</span></div>
+                </div>
+                <div class="wallet-metric">
+                    <div class="wallet-metric-label">Assets Count</div>
+                    <div class="wallet-metric-value"><span id="asset-count">0</span></div>
+                </div>
+            </div>
+            
+            <details>
+                <summary style="cursor: pointer; padding: 10px; margin: 10px 0; background: rgba(255,255,255,0.1); border-radius: 5px;">
+                    📊 View Detailed Balances & Loans
+                </summary>
+                <table class="balances-table">
+                    <thead>
+                        <tr>
+                            <th>Asset</th>
+                            <th>Spot</th>
+                            <th>Earn</th>
+                            <th>Loans</th>
+                            <th>USD Value</th>
+                        </tr>
+                    </thead>
+                    <tbody id="balances-body">
+                        <tr>
+                            <td colspan="5" style="text-align: center; opacity: 0.7;">Loading wallet data...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </details>
+        </div>
+        
         <div class="controls">
             <h3>Bot Control Panel</h3>
             <div class="input-group">
                 <label for="capital">Initial Capital (USD):</label>
-                <input type="number" id="capital" value="10000" min="100" step="100">
+                <input type="number" id="capital" value="100" min="10" step="10">
             </div>
             <button class="btn btn-success" onclick="startBot()">🚀 Start Bot</button>
             <button class="btn btn-danger" onclick="stopBot()">⛔ Stop Bot</button>
@@ -739,6 +1022,47 @@ HTML_TEMPLATE = '''
             }
         }
         
+        async function updateWalletInfo() {
+            try {
+                const response = await fetch('/wallet');
+                const data = await response.json();
+                
+                // Update wallet metrics
+                document.getElementById('total-wallet').textContent = data.total_wallet_usd.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                document.getElementById('spot-balance').textContent = data.total_spot_usd.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                document.getElementById('earn-balance').textContent = data.total_earn_usd.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                document.getElementById('loan-balance').textContent = data.total_loans_usd.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                document.getElementById('asset-count').textContent = data.asset_count;
+                
+                // Update balances table
+                const tbody = document.getElementById('balances-body');
+                tbody.innerHTML = '';
+                
+                if (Object.keys(data.balances).length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; opacity: 0.7;">No balances found</td></tr>';
+                } else {
+                    Object.entries(data.balances).forEach(([asset, balance]) => {
+                        const row = document.createElement('tr');
+                        const spotAmount = balance.spot || 0;
+                        const earnAmount = balance.earn || 0;
+                        const loanAmount = balance.loan || 0;
+                        const usdValue = balance.usd_value || 0;
+                        
+                        row.innerHTML = `
+                            <td><strong>${asset}</strong></td>
+                            <td class="${spotAmount > 0 ? 'balance-positive' : 'balance-neutral'}">${spotAmount.toFixed(6)}</td>
+                            <td class="${earnAmount > 0 ? 'balance-positive' : 'balance-neutral'}">${earnAmount.toFixed(6)}</td>
+                            <td class="${loanAmount < 0 ? 'balance-negative' : 'balance-neutral'}">${Math.abs(loanAmount).toFixed(6)}</td>
+                            <td class="balance-positive">${usdValue.toFixed(2)}</td>
+                        `;
+                        tbody.appendChild(row);
+                    });
+                }
+            } catch (error) {
+                console.error('Error updating wallet info:', error);
+            }
+        }
+        
         async function updateStatus() {
             try {
                 const response = await fetch('/status');
@@ -829,11 +1153,13 @@ HTML_TEMPLATE = '''
         // Auto-update intervals
         setInterval(updateStatus, 10000);      // Every 10 seconds
         setInterval(updateBestPair, 30000);    // Every 30 seconds
+        setInterval(updateWalletInfo, 60000);  // Every 60 seconds
         
         // Initial load
         loadAssetConfig();
         updateStatus();
         updateBestPair();
+        updateWalletInfo();
     </script>
 </body>
 </html>
@@ -910,6 +1236,16 @@ def get_best_pair():
         # Return default best pair
         temp_bot = MultiAssetLeverageBot('demo', 'demo')
         return jsonify(temp_bot.get_best_earn_pair())
+
+@app.route('/wallet')
+def get_wallet():
+    global bot
+    if bot:
+        return jsonify(bot.get_wallet_summary())
+    else:
+        # Return default wallet summary
+        temp_bot = MultiAssetLeverageBot('demo', 'demo')
+        return jsonify(temp_bot.get_wallet_summary())
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
