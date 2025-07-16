@@ -1,4 +1,3 @@
-# main.py - Complete Multi-Asset Leverage Bot with Real Binance Data
 import os
 import requests
 import hmac
@@ -45,12 +44,12 @@ class EarnPair:
     risk_score: float
 
 class BinanceEarnAPI:
-    """Real Binance API integration for earn data"""
+    """Real Binance API integration"""
     
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
         self.api_key = api_key
         self.api_secret = api_secret
-        self.base_url = "https://api.binance.com" if not testnet else "https://testnet.binance.vision"
+        self.base_url = "https://testnet.binance.vision" if testnet else "https://api.binance.com"
         self.headers = {'X-MBX-APIKEY': api_key}
         
     def _generate_signature(self, query_string: str) -> str:
@@ -61,7 +60,7 @@ class BinanceEarnAPI:
             hashlib.sha256
         ).hexdigest()
     
-    def _make_request(self, endpoint: str, params: Dict = None) -> Dict:
+    def _make_request(self, endpoint: str, params: Dict = None, method: str = 'GET') -> Dict:
         """Make authenticated request to Binance API"""
         if params is None:
             params = {}
@@ -71,48 +70,114 @@ class BinanceEarnAPI:
         params['signature'] = self._generate_signature(query_string)
         
         try:
-            response = requests.get(f"{self.base_url}{endpoint}", params=params, headers=self.headers)
+            if method == 'GET':
+                response = requests.get(f"{self.base_url}{endpoint}", params=params, headers=self.headers, timeout=10)
+            else:
+                response = requests.post(f"{self.base_url}{endpoint}", data=params, headers=self.headers, timeout=10)
+            
+            response.raise_for_status()
             return response.json()
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
             logging.error(f"API request failed: {e}")
             return {}
     
-    def get_lending_products(self) -> List[Dict]:
-        """Get available lending products"""
-        endpoint = "/sapi/v1/lending/daily/product/list"
-        params = {"status": "ALL"}
-        return self.._make_request(endpoint, params).get('data', [])
+    def get_account_info(self) -> Dict:
+        """Get spot account information"""
+        endpoint = "/api/v3/account"
+        return self._make_request(endpoint)
     
-    def get_collateral_assets(self) -> List[Dict]:
-        """Get assets available as collateral"""
-        endpoint = "/sapi/v1/margin/isolated/allPairs"
-        return self._make_request(endpoint).get('data', [])
+    def get_margin_account(self) -> Dict:
+        """Get margin account information"""
+        endpoint = "/sapi/v1/margin/account"
+        return self._make_request(endpoint)
     
-    def get_margin_interest_rates(self) -> List[Dict]:
-        """Get current margin interest rates"""
-        endpoint = "/sapi/v1/margin/interestRateHistory"
-        params = {"limit": 100}
-        return self._make_request(endpoint).get('data', [])
+    def get_spot_prices(self) -> List[Dict]:
+        """Get all spot prices"""
+        endpoint = "/api/v3/ticker/price"
+        try:
+            response = requests.get(f"{self.base_url}{endpoint}", timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except:
+            return []
     
     def get_flexible_products(self) -> List[Dict]:
         """Get flexible savings products"""
         endpoint = "/sapi/v1/lending/daily/product/list"
         params = {"status": "PURCHASING", "featured": "ALL"}
-        return self._make_request(endpoint).get('data', [])
+        return self._make_request(endpoint, params).get('data', [])
+    
+    def get_margin_interest_rates(self) -> List[Dict]:
+        """Get margin interest rates"""
+        endpoint = "/sapi/v1/margin/interestRateHistory"
+        params = {"limit": 100}
+        return self._make_request(endpoint, params).get('data', [])
+    
+    def get_earn_balances(self) -> List[Dict]:
+        """Get flexible savings positions"""
+        endpoint = "/sapi/v1/lending/daily/token/position"
+        params = {"status": "HOLDING"}
+        return self._make_request(endpoint, params).get('data', [])
+    
+    def place_margin_order(self, symbol: str, side: str, type: str, quantity: float, **kwargs) -> Dict:
+        """Place margin order"""
+        endpoint = "/sapi/v1/margin/order"
+        params = {
+            'symbol': symbol,
+            'side': side,
+            'type': type,
+            'quantity': quantity,
+            **kwargs
+        }
+        return self._make_request(endpoint, params, method='POST')
+    
+    def margin_borrow(self, asset: str, amount: float) -> Dict:
+        """Borrow asset on margin"""
+        endpoint = "/sapi/v1/margin/loan"
+        params = {
+            'asset': asset,
+            'amount': amount
+        }
+        return self._make_request(endpoint, params, method='POST')
+    
+    def margin_repay(self, asset: str, amount: float) -> Dict:
+        """Repay margin loan"""
+        endpoint = "/sapi/v1/margin/repay"
+        params = {
+            'asset': asset,
+            'amount': amount
+        }
+        return self._make_request(endpoint, params, method='POST')
+    
+    def subscribe_flexible_product(self, product_id: str, amount: float) -> Dict:
+        """Subscribe to flexible savings product"""
+        endpoint = "/sapi/v1/lending/daily/purchase"
+        params = {
+            'productId': product_id,
+            'amount': amount
+        }
+        return self._make_request(endpoint, params, method='POST')
+    
+    def redeem_flexible_product(self, product_id: str, amount: float, type: str = "FAST") -> Dict:
+        """Redeem from flexible savings"""
+        endpoint = "/sapi/v1/lending/daily/redeem"
+        params = {
+            'productId': product_id,
+            'amount': amount,
+            'type': type
+        }
+        return self._make_request(endpoint, params, method='POST')
 
 class MultiAssetLeverageBot:
     """Multi-Asset Leverage Bot with Real Binance Integration"""
     
-    def __init__(self, api_key: str = "demo", api_secret: str = "demo", testnet: bool = True):
+    def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = testnet
         
         # Initialize Binance API
-        if api_key != "demo" and api_secret != "demo":
-            self.binance_api = BinanceEarnAPI(api_key, api_secret, testnet)
-        else:
-            self.binance_api = None
+        self.binance_api = BinanceEarnAPI(api_key, api_secret, testnet)
         
         # Logging setup
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -148,13 +213,17 @@ class MultiAssetLeverageBot:
         self.total_wallet_usd = 0
         self.last_balance_update = datetime.now() - timedelta(hours=1)
         
+        # Price cache
+        self.price_cache = {}
+        self.last_price_update = datetime.now() - timedelta(minutes=5)
+        
         # Start background threads
         self._start_pair_analysis_thread()
         self._start_balance_monitoring_thread()
+        self._start_price_monitoring_thread()
     
     def _initialize_asset_config(self) -> Dict[str, AssetConfig]:
         """Initialize asset configuration with real data when possible"""
-        # Complete configuration based on uploaded token list
         base_config = {
             # Tier 1 - Blue Chip Assets (Highest Liquidity, Lowest Risk)
             'BTC': AssetConfig('BTC', 0.75, 0.04, 1, 0.022, 0.25),
@@ -190,11 +259,10 @@ class MultiAssetLeverageBot:
         }
         
         # Update with real rates if API available
-        if self.binance_api:
-            try:
-                self._update_rates_from_binance(base_config)
-            except Exception as e:
-                self.logger.warning(f"Could not update rates from Binance: {e}")
+        try:
+            self._update_rates_from_binance(base_config)
+        except Exception as e:
+            self.logger.warning(f"Could not update rates from Binance: {e}")
         
         return base_config
     
@@ -209,7 +277,8 @@ class MultiAssetLeverageBot:
                 if asset in config:
                     # Update yield rate from flexible savings
                     yield_rate = float(product.get('avgAnnualInterestRate', 0)) / 100
-                    config[asset].yield_rate = max(yield_rate, config[asset].yield_rate * 0.5)
+                    if yield_rate > 0:
+                        config[asset].yield_rate = max(yield_rate, config[asset].yield_rate * 0.8)
             
             # Get margin rates for borrowing costs
             margin_rates = self.binance_api.get_margin_interest_rates()
@@ -220,10 +289,57 @@ class MultiAssetLeverageBot:
                     # Update loan rate from margin data
                     daily_rate = float(rate_data.get('dailyInterestRate', 0))
                     annual_rate = daily_rate * 365
-                    config[asset].loan_rate = annual_rate
+                    if annual_rate > 0:
+                        config[asset].loan_rate = annual_rate
                     
         except Exception as e:
             self.logger.error(f"Error updating rates from Binance: {e}")
+    
+    def _start_price_monitoring_thread(self):
+        """Start background thread for price monitoring"""
+        def monitor_prices():
+            while True:
+                try:
+                    if datetime.now() - self.last_price_update > timedelta(minutes=1):
+                        self._update_price_cache()
+                        self.last_price_update = datetime.now()
+                    time.sleep(60)  # Check every minute
+                except Exception as e:
+                    self.logger.error(f"Error in price monitoring thread: {e}")
+                    time.sleep(300)  # Wait 5 minutes on error
+        
+        thread = threading.Thread(target=monitor_prices, daemon=True)
+        thread.start()
+    
+    def _update_price_cache(self):
+        """Update price cache with current market prices"""
+        try:
+            prices = self.binance_api.get_spot_prices()
+            new_cache = {}
+            
+            for price_data in prices:
+                symbol = price_data['symbol']
+                price = float(price_data['price'])
+                new_cache[symbol] = price
+            
+            self.price_cache = new_cache
+            self.logger.info(f"Price cache updated with {len(new_cache)} symbols")
+            
+        except Exception as e:
+            self.logger.error(f"Error updating price cache: {e}")
+    
+    def _get_usd_price(self, asset: str) -> float:
+        """Get USD price for an asset"""
+        if asset in ['USDT', 'USDC', 'BUSD']:
+            return 1.0
+            
+        # Try different symbol combinations
+        for suffix in ['USDT', 'USDC', 'BUSD']:
+            symbol = f"{asset}{suffix}"
+            if symbol in self.price_cache:
+                return self.price_cache[symbol]
+        
+        return 0.0
     
     def _start_pair_analysis_thread(self):
         """Start background thread for pair analysis"""
@@ -233,7 +349,7 @@ class MultiAssetLeverageBot:
                     if datetime.now() - self.last_pair_update > timedelta(minutes=5):
                         self._analyze_best_earn_pair()
                         self.last_pair_update = datetime.now()
-                    time.sleep(60)  # Check every minute
+                    time.sleep(300)  # Check every 5 minutes
                 except Exception as e:
                     self.logger.error(f"Error in pair analysis thread: {e}")
                     time.sleep(300)  # Wait 5 minutes on error
@@ -259,11 +375,6 @@ class MultiAssetLeverageBot:
     
     def _update_wallet_balances(self):
         """Update current wallet balances and loans"""
-        if not self.binance_api:
-            # Mock data for demo mode
-            self._generate_mock_balances()
-            return
-            
         try:
             # Get spot account balances
             account_info = self.binance_api.get_account_info()
@@ -313,9 +424,6 @@ class MultiAssetLeverageBot:
                         }
             
             # Calculate total USD value
-            prices = self.binance_api.get_spot_prices()
-            price_map = {p['symbol']: float(p['price']) for p in prices}
-            
             total_usd_value = 0
             
             # Combine all balances
@@ -344,17 +452,7 @@ class MultiAssetLeverageBot:
                 total_asset_amount = balances['spot'] + balances['earn'] + balances['loan']
                 
                 # Get USD price
-                usd_price = 0
-                if asset == 'USDT' or asset == 'USDC':
-                    usd_price = 1.0
-                else:
-                    # Try different symbol combinations
-                    for suffix in ['USDT', 'BUSD', 'USDC']:
-                        symbol = f"{asset}{suffix}"
-                        if symbol in price_map:
-                            usd_price = price_map[symbol]
-                            break
-                
+                usd_price = self._get_usd_price(asset)
                 usd_value = total_asset_amount * usd_price
                 total_usd_value += usd_value
                 
@@ -370,22 +468,6 @@ class MultiAssetLeverageBot:
             
         except Exception as e:
             self.logger.error(f"Error updating wallet balances: {e}")
-            self._generate_mock_balances()
-    
-    def _generate_mock_balances(self):
-        """Generate mock balances for demo mode"""
-        # Mock some realistic balances
-        mock_balances = {
-            'BTC': {'spot': 0.05, 'earn': 0.02, 'loan': 0, 'usd_value': 2100, 'price': 30000},
-            'ETH': {'spot': 0.8, 'earn': 0.5, 'loan': 0, 'usd_value': 2600, 'price': 2000},
-            'BNB': {'spot': 2.5, 'earn': 1.2, 'loan': 0, 'usd_value': 1110, 'price': 300},
-            'USDT': {'spot': 500, 'earn': 800, 'loan': -200, 'usd_value': 1100, 'price': 1},
-            'USDC': {'spot': 300, 'earn': 0, 'loan': 0, 'usd_value': 300, 'price': 1},
-        }
-        
-        self.current_balances = mock_balances
-        self.total_wallet_usd = sum(b['usd_value'] for b in mock_balances.values())
-        self.current_loans = {'USDT': {'borrowed': 200, 'interest': 1.5}}
     
     def get_wallet_summary(self) -> Dict:
         """Get comprehensive wallet summary"""
@@ -407,18 +489,18 @@ class MultiAssetLeverageBot:
         }
     
     def _analyze_best_earn_pair(self):
-        """Analyze and find the best collateral/borrow pair from all available assets"""
+        """Analyze and find the best collateral/borrow pair"""
         try:
             best_pairs = []
             
             # Get current market data and trends
             market_trends = self._get_market_trends()
             
-            # Define optimal borrow assets (prefer stablecoins and low-volatility assets)
+            # Define optimal borrow assets
             preferred_borrow_assets = ['USDT', 'USDC', 'BTC', 'ETH']
             
             for collateral_asset, collateral_config in self.asset_config.items():
-                # Skip stablecoins as collateral in most cases (lower yield potential)
+                # Skip stablecoins as collateral in most cases
                 if collateral_asset in ['USDT', 'USDC']:
                     continue
                     
@@ -447,18 +529,18 @@ class MultiAssetLeverageBot:
                         collateral_config.volatility_factor * 0.4 +
                         borrow_config.volatility_factor * 0.2 +
                         (1 - collateral_config.ltv_max) * 0.3 +
-                        (1 / collateral_config.liquidity_tier) * 0.1  # Lower tier = higher risk
+                        (1 / collateral_config.liquidity_tier) * 0.1
                     )
                     
-                    # Bonus for stablecoin borrowing (reduced volatility risk)
+                    # Bonus for stablecoin borrowing
                     stability_bonus = 2.0 if borrow_asset in ['USDT', 'USDC'] else 1.0
                     
                     # Calculate overall profit potential
                     profit_potential = (
-                        net_rate * 100 * 0.5 +      # Interest rate differential (50% weight)
-                        price_advantage * 0.25 +     # Price trend advantage (25% weight)
-                        (1 / risk_score) * 0.15 +    # Risk adjustment (15% weight)
-                        collateral_config.ltv_max * 10 * 0.1  # LTV flexibility (10% weight)
+                        net_rate * 100 * 0.5 +
+                        price_advantage * 0.25 +
+                        (1 / risk_score) * 0.15 +
+                        collateral_config.ltv_max * 10 * 0.1
                     ) * stability_bonus
                     
                     pair = EarnPair(
@@ -496,42 +578,42 @@ class MultiAssetLeverageBot:
         meme_assets = ['BOME', 'WIF']
         
         for asset in self.asset_config.keys():
-            # Base trend calculation with some randomness for simulation
+            # Base trend calculation
             base_trend = (hash(asset + str(datetime.now().date())) % 200 - 100) / 2000
             
             # Apply category-specific adjustments
             if asset in blue_chip_assets:
-                base_trend += 0.01  # Slight positive bias for blue chips
+                base_trend += 0.01
             elif asset in stablecoins:
-                base_trend = base_trend * 0.1  # Very low volatility
+                base_trend = base_trend * 0.1
             elif asset in defi_assets:
-                base_trend += 0.005  # Slight DeFi sector bias
+                base_trend += 0.005
             elif asset in gaming_metaverse:
-                base_trend += 0.008  # Gaming sector potential
+                base_trend += 0.008
             elif asset in meme_assets:
-                base_trend = base_trend * 1.5  # Higher volatility
+                base_trend = base_trend * 1.5
             
             # Apply tier-based adjustment
             tier = self.asset_config[asset].liquidity_tier
-            tier_adjustment = (5 - tier) * 0.002  # Higher tier = slight positive bias
+            tier_adjustment = (5 - tier) * 0.002
             
             trends[asset] = base_trend + tier_adjustment
         
         return trends
     
     def calculate_cascade_structure(self, initial_capital: float) -> List[Dict]:
-        """Calculate cascade leverage structure with all available assets"""
+        """Calculate cascade leverage structure"""
         cascade_levels = []
         current_capital = initial_capital
         
-        # Sort assets by efficiency score (risk-adjusted yield)
+        # Sort assets by efficiency score
         sorted_assets = sorted(
             self.asset_config.items(),
             key=lambda x: (x[1].yield_rate - x[1].loan_rate) / (1 + x[1].volatility_factor),
             reverse=True
         )
         
-        # Filter out stablecoins for collateral (but keep them for borrowing)
+        # Filter out stablecoins for collateral
         collateral_assets = [asset for asset in sorted_assets if asset[0] not in ['USDT', 'USDC']]
         
         for level in range(min(self.max_cascade_levels, len(collateral_assets))):
@@ -541,7 +623,7 @@ class MultiAssetLeverageBot:
             asset_name, asset_config = collateral_assets[level]
             max_loan = current_capital * asset_config.ltv_max
             
-            # Choose optimal borrow asset (preferably stablecoins for lower volatility)
+            # Choose optimal borrow asset
             borrow_asset = 'USDT'  # Default to USDT for stability
             borrow_rate = self.asset_config['USDT'].loan_rate
             
@@ -561,10 +643,10 @@ class MultiAssetLeverageBot:
         
         return cascade_levels
     
-    async def start_simulation(self, initial_capital: float):
-        """Start bot simulation"""
+    async def execute_real_strategy(self, initial_capital: float):
+        """Execute real trading strategy"""
         try:
-            self.logger.info(f"Starting simulation with capital: ${initial_capital}")
+            self.logger.info(f"Starting REAL MONEY strategy with capital: ${initial_capital}")
             self.total_capital = initial_capital
             self.is_running = True
             self.bot_status = "Running"
@@ -572,7 +654,107 @@ class MultiAssetLeverageBot:
             # Calculate cascade structure
             cascade_structure = self.calculate_cascade_structure(initial_capital)
             
-            # Create positions
+            # Execute each level
+            for cascade_level in cascade_structure:
+                try:
+                    # Execute the cascade level
+                    success = await self._execute_cascade_level(cascade_level)
+                    
+                    if success:
+                        position = Position(
+                            asset=cascade_level['collateral_asset'],
+                            collateral_amount=cascade_level['collateral_amount'],
+                            loan_amount=cascade_level['loan_amount'],
+                            loan_asset=cascade_level['loan_asset'],
+                            current_ltv=cascade_level['loan_amount'] / cascade_level['collateral_amount'],
+                            yield_earned=0,
+                            level=cascade_level['level']
+                        )
+                        self.positions.append(position)
+                        
+                        self.logger.info(f"Successfully executed level {cascade_level['level']}")
+                    else:
+                        self.logger.error(f"Failed to execute level {cascade_level['level']}")
+                        break
+                        
+                except Exception as e:
+                    self.logger.error(f"Error executing cascade level {cascade_level['level']}: {e}")
+                    break
+            
+            # Calculate final metrics
+            total_leveraged = sum(pos.loan_amount for pos in self.positions)
+            self.leveraged_capital = total_leveraged
+            
+            annual_yield = sum((l['net_yield']) * l['loan_amount'] for l in cascade_structure)
+            self.total_yield = (annual_yield / initial_capital) * 100
+            
+            self.logger.info(f"Strategy executed successfully. {len(self.positions)} positions created.")
+            
+        except Exception as e:
+            self.logger.error(f"Strategy execution error: {e}")
+            self.bot_status = "Error"
+    
+    async def _execute_cascade_level(self, cascade_level: Dict) -> bool:
+        """Execute a single cascade level"""
+        try:
+            collateral_asset = cascade_level['collateral_asset']
+            loan_amount = cascade_level['loan_amount']
+            loan_asset = cascade_level['loan_asset']
+            
+            # Step 1: Purchase collateral asset if needed
+            collateral_symbol = f"{collateral_asset}USDT"
+            
+            # Step 2: Subscribe to flexible savings
+            flexible_products = self.binance_api.get_flexible_products()
+            product_id = None
+            
+            for product in flexible_products:
+                if product.get('asset') == collateral_asset:
+                    product_id = product.get('productId')
+                    break
+            
+            if product_id:
+                subscribe_result = self.binance_api.subscribe_flexible_product(
+                    product_id, cascade_level['collateral_amount']
+                )
+                
+                if 'purchaseId' not in subscribe_result:
+                    return False
+            
+            # Step 3: Borrow against collateral
+            borrow_result = self.binance_api.margin_borrow(loan_asset, loan_amount)
+            
+            if 'tranId' not in borrow_result:
+                return False
+            
+            self.logger.info(f"Level {cascade_level['level']} executed: {collateral_asset} collateral, borrowed {loan_amount} {loan_asset}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error executing cascade level: {e}")
+            return False
+    
+    async def start_simulation(self, initial_capital: float):
+        """Start bot simulation or real execution"""
+        if self.api_key == "demo" or self.api_secret == "demo":
+            # Run simulation
+            await self._run_simulation(initial_capital)
+        else:
+            # Run real strategy
+            await self.execute_real_strategy(initial_capital)
+    
+    async def _run_simulation(self, initial_capital: float):
+        """Run simulation mode"""
+        try:
+            self.logger.info(f"Starting SIMULATION with capital: ${initial_capital}")
+            self.total_capital = initial_capital
+            self.is_running = True
+            self.bot_status = "Running (Simulation)"
+            
+            # Calculate cascade structure
+            cascade_structure = self.calculate_cascade_structure(initial_capital)
+            
+            # Create simulated positions
             total_leveraged = 0
             for cascade_level in cascade_structure:
                 position = Position(
@@ -666,7 +848,7 @@ HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Multi-Asset Leverage Bot</title>
+    <title>Multi-Asset Leverage Bot - LIVE</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -746,6 +928,23 @@ HTML_TEMPLATE = '''
         }
         
         .header { text-align: center; color: #333; margin-bottom: 30px; }
+        .live-indicator {
+            background: linear-gradient(45deg, #ff0000, #ff4444);
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            animation: blink 2s infinite;
+        }
+        
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0.5; }
+        }
+        
         .controls { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
         .status { display: flex; justify-content: space-between; margin-bottom: 20px; }
         .metric { background: #007bff; color: white; padding: 15px; border-radius: 8px; text-align: center; flex: 1; margin: 0 5px; }
@@ -870,8 +1069,8 @@ HTML_TEMPLATE = '''
 
     <div class="container">
         <div class="header">
-            <h1>🚀 Multi-Asset Leverage Bot</h1>
-            <p>Advanced Cascade Leverage Strategy with 24 Premium Assets & Real-Time Market Analysis</p>
+            <h1>🚀 Multi-Asset Leverage Bot <span class="live-indicator">LIVE</span></h1>
+            <p>Advanced Cascade Leverage Strategy - REAL MONEY TRADING</p>
         </div>
         
         <!-- Wallet Summary Section -->
@@ -924,12 +1123,12 @@ HTML_TEMPLATE = '''
         </div>
         
         <div class="controls">
-            <h3>Bot Control Panel</h3>
+            <h3>🔴 LIVE Bot Control Panel</h3>
             <div class="input-group">
                 <label for="capital">Initial Capital (USD):</label>
                 <input type="number" id="capital" value="100" min="10" step="10">
             </div>
-            <button class="btn btn-success" onclick="startBot()">🚀 Start Bot</button>
+            <button class="btn btn-success" onclick="startBot()">🚀 Start LIVE Bot</button>
             <button class="btn btn-danger" onclick="stopBot()">⛔ Stop Bot</button>
             <button class="btn btn-primary" onclick="updateStatus()">🔄 Refresh Status</button>
         </div>
@@ -1077,7 +1276,7 @@ HTML_TEMPLATE = '''
                 // Update bot status
                 const statusElement = document.getElementById('bot-status');
                 statusElement.textContent = data.bot_status;
-                statusElement.className = 'status-indicator status-' + data.bot_status.toLowerCase();
+                statusElement.className = 'status-indicator status-' + data.bot_status.toLowerCase().replace(/[^a-z]/g, '');
                 
                 // Update positions table
                 const tbody = document.getElementById('positions-body');
@@ -1176,13 +1375,14 @@ def start_bot():
         data = request.get_json()
         capital = data.get('capital', 10000)
         
-        # Create new bot instance
-        api_key = os.getenv('BINANCE_API_KEY', 'demo_key')
-        api_secret = os.getenv('BINANCE_API_SECRET', 'demo_secret')
+        # Create new bot instance with real API keys
+        api_key = os.getenv('BINANCE_API_KEY', 'demo')
+        api_secret = os.getenv('BINANCE_API_SECRET', 'demo')
+        testnet = os.getenv('BINANCE_TESTNET', 'false').lower() == 'true'
         
-        bot = MultiAssetLeverageBot(api_key, api_secret, testnet=True)
+        bot = MultiAssetLeverageBot(api_key, api_secret, testnet)
         
-        # Start simulation
+        # Start bot
         thread = threading.Thread(target=lambda: asyncio.run(bot.start_simulation(capital)))
         thread.start()
         
