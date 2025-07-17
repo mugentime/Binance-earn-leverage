@@ -134,73 +134,57 @@ class BinanceAPI:
         self.logger.info(f"🔥 PLACING REAL ORDER: {side} {quantity} {symbol}")
         return self._make_request("/api/v3/order", params, method='POST', require_auth=True)
     
-    def get_order_status(self, symbol: str, order_id: str) -> Dict:
-        return self._make_request("/api/v3/order", {
-            'symbol': symbol,
-            'orderId': order_id
-        }, require_auth=True)
+    # EARN WALLET APIs (Updated with working endpoints)
+    def get_savings_products(self) -> List[Dict]:
+        """Get available savings products (Simple Earn)"""
+        return self._make_request("/sapi/v1/simple-earn/flexible/list", require_auth=True)
     
-    # EARN WALLET / LENDING APIS
-    def get_flexible_products(self) -> List[Dict]:
-        """Get available flexible savings products"""
-        return self._make_request("/sapi/v1/lending/daily/product/list", {
-            'status': 'PURCHASING'
-        }, require_auth=True)
-    
-    def purchase_flexible_product(self, product_id: str, amount: float) -> Dict:
-        """Deposit asset into flexible savings (earn wallet)"""
+    def purchase_savings_product(self, product_id: str, amount: float) -> Dict:
+        """Subscribe to flexible savings product"""
         params = {
             'productId': product_id,
             'amount': f"{amount:.8f}".rstrip('0').rstrip('.')
         }
-        self.logger.info(f"💰 DEPOSITING TO EARN WALLET: {amount} - Product: {product_id}")
-        return self._make_request("/sapi/v1/lending/daily/purchase", params, method='POST', require_auth=True)
+        self.logger.info(f"💰 DEPOSITING TO EARN: {amount} - Product: {product_id}")
+        return self._make_request("/sapi/v1/simple-earn/flexible/subscribe", params, method='POST', require_auth=True)
     
-    def redeem_flexible_product(self, product_id: str, amount: float) -> Dict:
-        """Withdraw from flexible savings"""
+    def redeem_savings_product(self, product_id: str, amount: float) -> Dict:
+        """Redeem from flexible savings"""
         params = {
             'productId': product_id,
             'amount': f"{amount:.8f}".rstrip('0').rstrip('.'),
             'type': 'FAST'
         }
-        self.logger.info(f"💸 WITHDRAWING FROM EARN WALLET: {amount} - Product: {product_id}")
-        return self._make_request("/sapi/v1/lending/daily/redeem", params, method='POST', require_auth=True)
+        self.logger.info(f"💸 WITHDRAWING FROM EARN: {amount} - Product: {product_id}")
+        return self._make_request("/sapi/v1/simple-earn/flexible/redeem", params, method='POST', require_auth=True)
     
-    def get_flexible_positions(self) -> List[Dict]:
-        """Get current flexible savings positions"""
-        return self._make_request("/sapi/v1/lending/daily/token/position", require_auth=True)
+    def get_savings_positions(self) -> List[Dict]:
+        """Get flexible savings positions"""
+        return self._make_request("/sapi/v1/simple-earn/flexible/position", require_auth=True)
     
-    # CRYPTO LOAN APIS (Borrow against earn positions)
-    def get_loan_products(self) -> List[Dict]:
-        """Get available crypto loan products"""
-        return self._make_request("/sapi/v1/loan/flexible/ongoing/orders", require_auth=True)
-    
+    # CRYPTO LOAN APIs (Updated)
     def apply_crypto_loan(self, loan_coin: str, collateral_coin: str, loan_amount: float) -> Dict:
-        """Apply for crypto loan (borrow against earn positions)"""
+        """Apply for crypto loan"""
         params = {
             'loanCoin': loan_coin,
             'collateralCoin': collateral_coin,
-            'loanAmount': f"{loan_amount:.8f}".rstrip('0').rstrip('.')
+            'loanAmount': f"{loan_amount:.2f}"
         }
         self.logger.info(f"🏦 APPLYING FOR CRYPTO LOAN: {loan_amount} {loan_coin} using {collateral_coin}")
-        return self._make_request("/sapi/v1/loan/flexible/borrow", params, method='POST', require_auth=True)
+        return self._make_request("/sapi/v1/loan/borrow", params, method='POST', require_auth=True)
     
     def repay_crypto_loan(self, order_id: str, amount: float) -> Dict:
         """Repay crypto loan"""
         params = {
             'orderId': order_id,
-            'amount': f"{amount:.8f}".rstrip('0').rstrip('.')
+            'amount': f"{amount:.2f}"
         }
         self.logger.info(f"💳 REPAYING CRYPTO LOAN: {amount} - Order: {order_id}")
-        return self._make_request("/sapi/v1/loan/flexible/repay", params, method='POST', require_auth=True)
+        return self._make_request("/sapi/v1/loan/repay", params, method='POST', require_auth=True)
     
     def get_loan_orders(self) -> List[Dict]:
-        """Get ongoing crypto loan orders"""
-        return self._make_request("/sapi/v1/loan/flexible/ongoing/orders", require_auth=True)
-    
-    def get_loan_ltv(self) -> Dict:
-        """Get loan-to-value ratios for all assets"""
-        return self._make_request("/sapi/v1/loan/flexible/ltv", require_auth=True)
+        """Get crypto loan orders"""
+        return self._make_request("/sapi/v1/loan/ongoing/orders", require_auth=True)
 
 class EarnWalletLeverageBot:
     """EARN WALLET LEVERAGE BOT - Creates leveraged positions using Binance's lending products"""
@@ -220,7 +204,7 @@ class EarnWalletLeverageBot:
         # Initialize API
         self.binance_api = BinanceAPI(api_key, api_secret, testnet)
         
-        # Trading configuration
+        # Trading configuration - Only REAL Binance assets
         self.asset_config = self._initialize_asset_config()
         self.max_cascade_levels = 3
         self.target_total_leverage = 2.0
@@ -236,18 +220,21 @@ class EarnWalletLeverageBot:
         self.is_running = False
         self.bot_status = "Stopped"
         self.price_cache = {}
-        self.flexible_products_cache = {}
+        self.savings_products_cache = {}
         
         # Load initial data
         self._update_price_cache()
-        self._load_flexible_products()
+        self._load_savings_products()
     
     def _initialize_asset_config(self) -> Dict[str, AssetConfig]:
-        """Asset configuration for earn wallet leverage - only valid symbols"""
+        """Asset configuration - ONLY real Binance assets that exist on Earn"""
         return {
+            # Major assets that definitely exist on Binance Earn
             'BTC': AssetConfig('BTC', 0.65, 0.04, 1, 0.025, 0.25),
             'ETH': AssetConfig('ETH', 0.60, 0.05, 1, 0.028, 0.30),
             'BNB': AssetConfig('BNB', 0.55, 0.06, 1, 0.030, 0.35),
+            'USDT': AssetConfig('USDT', 0.70, 0.08, 1, 0.020, 0.10),
+            'USDC': AssetConfig('USDC', 0.70, 0.075, 1, 0.021, 0.10),
             'ADA': AssetConfig('ADA', 0.50, 0.08, 2, 0.035, 0.50),
             'DOT': AssetConfig('DOT', 0.45, 0.09, 2, 0.038, 0.55),
             'LINK': AssetConfig('LINK', 0.40, 0.10, 2, 0.040, 0.60),
@@ -257,89 +244,69 @@ class EarnWalletLeverageBot:
         }
     
     def _update_price_cache(self):
-        """Load current prices for valid symbols only"""
+        """Load current prices for our assets only"""
         try:
             all_prices = self.binance_api.get_all_prices()
             if all_prices and isinstance(all_prices, list):
-                # Filter only valid symbols and our configured assets
-                valid_symbols = set()
-                for asset in self.asset_config.keys():
-                    if asset != 'USDT':
-                        valid_symbols.add(f"{asset}USDT")
-                
                 self.price_cache = {}
-                for price_data in all_prices:
-                    symbol = price_data.get('symbol', '')
-                    if symbol in valid_symbols:
-                        try:
-                            self.price_cache[symbol] = float(price_data['price'])
-                        except (ValueError, TypeError):
-                            continue
                 
-                self.logger.info(f"📊 Price cache updated: {len(self.price_cache)} valid pairs")
+                # Only get prices for our configured assets
+                for asset in self.asset_config.keys():
+                    if asset == 'USDT':
+                        self.price_cache['USDTUSDT'] = 1.0
+                        continue
+                    
+                    symbol = f"{asset}USDT"
+                    for price_data in all_prices:
+                        if price_data.get('symbol') == symbol:
+                            try:
+                                self.price_cache[symbol] = float(price_data['price'])
+                                break
+                            except (ValueError, TypeError):
+                                continue
+                
+                self.logger.info(f"📊 Price cache updated: {len(self.price_cache)} assets")
             else:
                 self.logger.warning("Failed to get price data from API")
         except Exception as e:
             self.logger.error(f"Error updating price cache: {e}")
-            # Initialize empty cache as fallback
             self.price_cache = {}
     
-    def _load_flexible_products(self):
-        """Load available flexible savings products with validation"""
+    def _load_savings_products(self):
+        """Load available savings products (Simple Earn)"""
         try:
-            products = self.binance_api.get_flexible_products()
+            products = self.binance_api.get_savings_products()
             if products and isinstance(products, list):
-                self.flexible_products_cache = {}
+                self.savings_products_cache = {}
                 for product in products:
                     asset = product.get('asset', '')
                     status = product.get('status', '')
                     
-                    # Only include products that are available for purchase
+                    # Only include products for our configured assets
                     if asset and status == 'PURCHASING' and asset in self.asset_config:
-                        self.flexible_products_cache[asset] = product
+                        self.savings_products_cache[asset] = product
                 
-                self.logger.info(f"💰 Loaded {len(self.flexible_products_cache)} flexible products")
+                self.logger.info(f"💰 Loaded {len(self.savings_products_cache)} savings products")
                 
-                # Log which assets have flexible products
-                available_assets = list(self.flexible_products_cache.keys())
+                # Log available assets
+                available_assets = list(self.savings_products_cache.keys())
                 if available_assets:
-                    self.logger.info(f"📋 Available earn products: {', '.join(available_assets)}")
+                    self.logger.info(f"📋 Available earn assets: {', '.join(available_assets)}")
                 else:
-                    self.logger.warning("⚠️ No flexible products available for configured assets")
+                    self.logger.warning("⚠️ No savings products available for configured assets")
             else:
-                self.logger.warning("Failed to load flexible products from API")
-                self.flexible_products_cache = {}
+                self.logger.warning("Failed to load savings products from API")
+                self.savings_products_cache = {}
         except Exception as e:
-            self.logger.error(f"Error loading flexible products: {e}")
-            self.flexible_products_cache = {}
-    
-    def _validate_symbol(self, symbol: str) -> bool:
-        """Validate if a trading symbol exists on Binance"""
-        try:
-            if not hasattr(self, '_valid_symbols'):
-                # Load valid symbols once and cache them
-                exchange_info = self.binance_api.get_exchange_info()
-                if "symbols" in exchange_info:
-                    self._valid_symbols = {s["symbol"] for s in exchange_info["symbols"] if s["status"] == "TRADING"}
-                else:
-                    self._valid_symbols = set()
-            
-            return symbol in self._valid_symbols
-        except Exception as e:
-            self.logger.error(f"Error validating symbol {symbol}: {e}")
-            return False
+            self.logger.error(f"Error loading savings products: {e}")
+            self.savings_products_cache = {}
     
     def _get_asset_price(self, asset: str) -> float:
-        """Get current asset price with validation"""
+        """Get current asset price"""
         if asset == 'USDT':
             return 1.0
         
         symbol = f"{asset}USDT"
-        
-        # Check if symbol is valid
-        if not self._validate_symbol(symbol):
-            self.logger.error(f"Invalid symbol: {symbol}")
-            return 0.0
         
         # Check cache first
         if symbol in self.price_cache:
@@ -420,21 +387,19 @@ class EarnWalletLeverageBot:
         try:
             current_capital = capital
             
-            # Filter and sort assets by availability and safety
+            # Filter assets that have both price and savings product
             available_assets = []
             for asset_name, asset_config in self.asset_config.items():
-                # Check if asset has valid symbol and flexible product
                 if asset_name == 'USDT':
                     continue
                     
-                symbol = f"{asset_name}USDT"
-                if (self._validate_symbol(symbol) and 
-                    asset_name in self.flexible_products_cache and
-                    self._get_asset_price(asset_name) > 0):
+                # Check if we have price data and savings product
+                if (self._get_asset_price(asset_name) > 0 and 
+                    asset_name in self.savings_products_cache):
                     available_assets.append((asset_name, asset_config))
             
             if not available_assets:
-                raise Exception("No valid assets available for trading")
+                raise Exception("No valid assets available for earn strategy")
             
             # Sort by safety (lower volatility first)
             available_assets.sort(key=lambda x: x[1].volatility_factor)
@@ -483,16 +448,6 @@ class EarnWalletLeverageBot:
             self.logger.info(f"🏦 EXECUTING EARN LEVEL {level}: {asset}")
             self.logger.info(f"💰 Collateral: ${collateral_amount:.2f} | Loan Target: ${loan_amount:.2f}")
             
-            # Pre-flight validation
-            symbol = f"{asset}USDT"
-            if not self._validate_symbol(symbol):
-                self.logger.error(f"❌ Invalid symbol: {symbol}")
-                return False
-            
-            if asset not in self.flexible_products_cache:
-                self.logger.error(f"❌ No flexible product for {asset}")
-                return False
-            
             # 1. GET CURRENT PRICE
             asset_price = self._get_asset_price(asset)
             if asset_price <= 0:
@@ -502,6 +457,7 @@ class EarnWalletLeverageBot:
             self.logger.info(f"💲 {asset} price: ${asset_price:.6f}")
             
             # 2. BUY ASSET ON SPOT
+            symbol = f"{asset}USDT"
             raw_quantity = collateral_amount / asset_price
             quantity = self._format_quantity(symbol, raw_quantity)
             
@@ -528,38 +484,38 @@ class EarnWalletLeverageBot:
             # Wait for order execution
             await asyncio.sleep(2)
             
-            # 3. DEPOSIT TO FLEXIBLE SAVINGS (EARN WALLET)
-            flexible_product = self.flexible_products_cache[asset]
-            product_id = flexible_product.get('productId')
+            # 3. DEPOSIT TO SAVINGS (EARN WALLET)
+            savings_product = self.savings_products_cache[asset]
+            product_id = savings_product.get('productId')
             
             if not product_id:
                 self.logger.error(f"❌ No product ID for {asset}")
                 return False
             
-            self.logger.info(f"💰 Depositing {quantity} {asset} to earn wallet...")
+            self.logger.info(f"💰 Depositing {quantity} {asset} to savings...")
             
-            deposit_result = self.binance_api.purchase_flexible_product(product_id, quantity)
+            deposit_result = self.binance_api.purchase_savings_product(product_id, quantity)
             
             if "error" in deposit_result:
-                self.logger.error(f"❌ EARN DEPOSIT FAILED: {deposit_result['message']}")
+                self.logger.error(f"❌ SAVINGS DEPOSIT FAILED: {deposit_result['message']}")
                 return False
             
-            self.logger.info(f"✅ DEPOSITED TO EARN WALLET: {quantity} {asset}")
+            self.logger.info(f"✅ DEPOSITED TO SAVINGS: {quantity} {asset}")
             
             # Wait for deposit to process
             await asyncio.sleep(3)
             
-            # 4. APPLY FOR CRYPTO LOAN AGAINST EARN POSITION
+            # 4. APPLY FOR CRYPTO LOAN AGAINST SAVINGS POSITION
             self.logger.info(f"🏦 Applying for crypto loan: ${loan_amount:.2f} USDT using {asset}")
             
             loan_result = self.binance_api.apply_crypto_loan('USDT', asset, loan_amount)
             
             if "error" in loan_result:
                 self.logger.error(f"❌ CRYPTO LOAN FAILED: {loan_result['message']}")
-                # Try to withdraw from earn wallet if loan fails
+                # Try to withdraw from savings if loan fails
                 try:
-                    self.binance_api.redeem_flexible_product(product_id, quantity)
-                    self.logger.info(f"🔄 Withdrew {quantity} {asset} from earn wallet after loan failure")
+                    self.binance_api.redeem_savings_product(product_id, quantity)
+                    self.logger.info(f"🔄 Withdrew {quantity} {asset} from savings after loan failure")
                 except:
                     pass
                 return False
@@ -630,17 +586,17 @@ class EarnWalletLeverageBot:
                 else:
                     self.logger.error(f"❌ LOAN REPAY FAILED: {repay_result['message']}")
             
-            # 2. Withdraw from flexible savings
+            # 2. Withdraw from savings
             if position.earn_product_id:
                 time.sleep(2)  # Wait for repayment
-                self.logger.info(f"💸 Withdrawing from earn wallet: {position.collateral_amount} {position.asset}")
+                self.logger.info(f"💸 Withdrawing from savings: {position.collateral_amount} {position.asset}")
                 
-                withdraw_result = self.binance_api.redeem_flexible_product(
+                withdraw_result = self.binance_api.redeem_savings_product(
                     position.earn_product_id, position.collateral_amount
                 )
                 
                 if "error" not in withdraw_result:
-                    self.logger.info(f"✅ WITHDRAWN FROM EARN: {position.collateral_amount} {position.asset}")
+                    self.logger.info(f"✅ WITHDRAWN FROM SAVINGS: {position.collateral_amount} {position.asset}")
                 else:
                     self.logger.error(f"❌ WITHDRAW FAILED: {withdraw_result['message']}")
             
@@ -720,13 +676,14 @@ class EarnWalletLeverageBot:
             balances = {}
             total_usd = 0
             
+            # Get spot balances
             for balance in account_info.get('balances', []):
                 asset = balance['asset']
                 free = float(balance['free'])
                 locked = float(balance['locked'])
                 total = free + locked
                 
-                if total > 0.001:
+                if total > 0.001 and asset in self.asset_config:
                     price = self._get_asset_price(asset)
                     if price > 0:
                         usd_value = total * price
@@ -737,18 +694,19 @@ class EarnWalletLeverageBot:
                             'spot_locked': locked,
                             'spot_total': total,
                             'price': price,
-                            'usd_value': usd_value
+                            'usd_value': usd_value,
+                            'savings_amount': 0
                         }
             
-            # Add flexible savings positions
+            # Add savings positions
             try:
-                flexible_positions = self.binance_api.get_flexible_positions()
-                if flexible_positions and isinstance(flexible_positions, list):
-                    for position in flexible_positions:
+                savings_positions = self.binance_api.get_savings_positions()
+                if savings_positions and isinstance(savings_positions, list):
+                    for position in savings_positions:
                         asset = position.get('asset', '')
                         amount = float(position.get('totalAmount', 0))
                         
-                        if asset and amount > 0.001:
+                        if asset and amount > 0.001 and asset in self.asset_config:
                             price = self._get_asset_price(asset)
                             if price > 0:
                                 usd_value = amount * price
@@ -757,13 +715,13 @@ class EarnWalletLeverageBot:
                                 if asset not in balances:
                                     balances[asset] = {
                                         'spot_free': 0, 'spot_locked': 0, 'spot_total': 0,
-                                        'price': price, 'usd_value': 0
+                                        'price': price, 'usd_value': 0, 'savings_amount': 0
                                     }
                                 
-                                balances[asset]['earn_amount'] = amount
+                                balances[asset]['savings_amount'] = amount
                                 balances[asset]['usd_value'] += usd_value
             except Exception as e:
-                self.logger.error(f"Error getting flexible positions: {e}")
+                self.logger.error(f"Error getting savings positions: {e}")
             
             return {
                 'total_usd_value': total_usd,
@@ -901,30 +859,30 @@ HTML_TEMPLATE = '''
 </head>
 <body>
     <div class="earn-banner">
-        🏦 EARN WALLET LEVERAGE - REAL LEVERAGED POSITIONS IN BINANCE EARN
+        🏦 BINANCE SIMPLE EARN LEVERAGE - REAL LEVERAGED POSITIONS
     </div>
 
     <div class="container">
         <div class="header">
-            <h1>🏦 Earn Wallet Leverage Bot</h1>
-            <p><strong>Creates Leveraged Positions Using Binance Earn Wallet</strong></p>
+            <h1>🏦 Simple Earn Leverage Bot</h1>
+            <p><strong>Creates Leveraged Positions Using Binance Simple Earn</strong></p>
         </div>
         
         <div class="earn-strategy">
-            <h3>🎯 Earn Wallet Leverage Strategy</h3>
-            <p>This bot creates leveraged positions by depositing assets into Binance Earn and borrowing against them:</p>
+            <h3>🎯 Simple Earn Leverage Strategy</h3>
+            <p>This bot creates leveraged positions by depositing assets into Binance Simple Earn and borrowing against them:</p>
             <div class="strategy-steps">
                 <div class="strategy-step">
                     <strong>1. Buy Asset</strong><br>
                     <small>Purchase crypto on spot market</small>
                 </div>
                 <div class="strategy-step">
-                    <strong>2. Deposit to Earn</strong><br>
-                    <small>Move to flexible savings (earn wallet)</small>
+                    <strong>2. Deposit to Simple Earn</strong><br>
+                    <small>Move to flexible savings</small>
                 </div>
                 <div class="strategy-step">
                     <strong>3. Borrow Against</strong><br>
-                    <small>Take crypto loan using earn position</small>
+                    <small>Take crypto loan using savings position</small>
                 </div>
                 <div class="strategy-step">
                     <strong>4. Cascade Repeat</strong><br>
@@ -956,7 +914,7 @@ HTML_TEMPLATE = '''
         </div>
         
         <div class="controls">
-            <h3>🏦 Earn Wallet Leverage Control</h3>
+            <h3>🏦 Simple Earn Leverage Control</h3>
             <div class="input-group">
                 <label for="capital">Capital to Deploy (USD):</label>
                 <input type="number" id="capital" value="50" min="20" step="10">
@@ -990,13 +948,13 @@ HTML_TEMPLATE = '''
         </div>
         
         <div>
-            <h3>📊 Earn Wallet Leverage Positions</h3>
+            <h3>📊 Simple Earn Leverage Positions</h3>
             <table class="positions-table" id="positions-table">
                 <thead>
                     <tr>
                         <th>Level</th>
                         <th>Asset</th>
-                        <th>Earn Amount</th>
+                        <th>Savings Amount</th>
                         <th>Loan (USDT)</th>
                         <th>LTV</th>
                         <th>USD Value</th>
@@ -1149,7 +1107,7 @@ def start_trading():
         thread = threading.Thread(target=start_async)
         thread.start()
         
-        return jsonify({'success': True, 'message': 'Earn wallet leverage executing'})
+        return jsonify({'success': True, 'message': 'Simple Earn leverage executing'})
         
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
