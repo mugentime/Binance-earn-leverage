@@ -1739,8 +1739,7 @@ bot = None
 # Flask Application
 app = Flask(__name__)
 
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
     <title>Earn Wallet Leverage Bot - OPTIMIZED BORROWING</title>
@@ -2101,13 +2100,13 @@ HTML_TEMPLATE = '''
         </div>
     </div>
 
-    <script>
+    <script type="text/javascript">
         let isTrading = false;
         
-        async function startEarnLeverage() {
+        function startEarnLeverage() {
             if (isTrading) return;
             
-            const capital = document.getElementById('capital').value;
+            var capital = document.getElementById('capital').value;
             
             if (capital < 15) {
                 alert('Minimum capital is $15');
@@ -2116,68 +2115,68 @@ HTML_TEMPLATE = '''
             
             isTrading = true;
             
-            try {
-                const response = await fetch('/start', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ capital: parseFloat(capital) })
-                });
-                
-                const result = await response.json();
-                
+            fetch('/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ capital: parseFloat(capital) })
+            })
+            .then(function(response) { return response.json(); })
+            .then(function(result) {
+                isTrading = false;
                 if (result.success) {
-                    alert('✅ EARN LEVERAGE STARTED! Creating optimized leveraged positions...');
+                    alert('EARN LEVERAGE STARTED! Creating optimized leveraged positions...');
                     setTimeout(updateStatus, 2000);
                 } else {
-                    alert(`❌ Failed: ${result.error}`);
+                    alert('Failed: ' + result.error);
                 }
-            } catch (error) {
-                alert(`❌ Error: ${error.message}`);
-            } finally {
+            })
+            .catch(function(error) {
                 isTrading = false;
-            }
+                alert('Error: ' + error.message);
+            });
         }
         
-        async function stopTrading() {
+        function stopTrading() {
             if (confirm('Are you sure you want to close all positions?')) {
-                try {
-                    const response = await fetch('/stop', { method: 'POST' });
-                    const result = await response.json();
-                    alert('🛑 Closing all positions...');
-                    setTimeout(updateStatus, 2000);
-                } catch (error) {
-                    alert(`❌ Error: ${error.message}`);
-                }
+                fetch('/stop', { method: 'POST' })
+                    .then(function(response) { return response.json(); })
+                    .then(function(result) {
+                        alert('Closing all positions...');
+                        setTimeout(updateStatus, 2000);
+                    })
+                    .catch(function(error) {
+                        alert('Error: ' + error.message);
+                    });
             }
         }
         
-        async function testConnection() {
-            try {
-                const response = await fetch('/test');
-                const result = await response.json();
-                
-                if (result.error) {
-                    alert(`❌ Error: ${result.error}`);
-                    return;
-                }
-                
-                let message = 'Connection Test Results:\n\n';
-                message += `✓ API Connection: ${result.connection ? 'SUCCESS' : 'FAILED'}\n`;
-                message += `✓ Account Access: ${result.account ? 'SUCCESS' : 'FAILED'}\n`;
-                message += `✓ Permissions: ${result.permissions && result.permissions.length > 0 ? result.permissions.join(', ') : 'None'}\n`;
-                message += `✓ Spot Trading: ${result.spot_trading ? 'ENABLED' : 'DISABLED'}\n`;
-                message += `✓ Price Data: ${result.prices ? 'AVAILABLE' : 'UNAVAILABLE'}\n`;
-                message += `✓ Savings Products: ${result.savings ? 'AVAILABLE' : 'UNAVAILABLE'}\n`;
-                message += `✓ Loan Data: ${result.loans ? 'AVAILABLE' : 'UNAVAILABLE'}\n`;
-                
-                if (result.errors && result.errors.length > 0) {
-                    message += `\n❌ Errors:\n${result.errors.join('\n')}`;
-                }
-                
-                alert(message);
-            } catch (error) {
-                alert(`❌ Test failed: ${error.message}`);
-            }
+        function testConnection() {
+            fetch('/test')
+                .then(function(response) { return response.json(); })
+                .then(function(result) {
+                    if (result.error) {
+                        alert('Error: ' + result.error);
+                        return;
+                    }
+                    
+                    var message = 'Connection Test Results:\\n\\n';
+                    message += 'API Connection: ' + (result.connection ? 'SUCCESS' : 'FAILED') + '\\n';
+                    message += 'Account Access: ' + (result.account ? 'SUCCESS' : 'FAILED') + '\\n';
+                    message += 'Permissions: ' + (result.permissions && result.permissions.length > 0 ? result.permissions.join(', ') : 'None') + '\\n';
+                    message += 'Spot Trading: ' + (result.spot_trading ? 'ENABLED' : 'DISABLED') + '\\n';
+                    message += 'Price Data: ' + (result.prices ? 'AVAILABLE' : 'UNAVAILABLE') + '\\n';
+                    message += 'Savings Products: ' + (result.savings ? 'AVAILABLE' : 'UNAVAILABLE') + '\\n';
+                    message += 'Loan Data: ' + (result.loans ? 'AVAILABLE' : 'UNAVAILABLE') + '\\n';
+                    
+                    if (result.errors && result.errors.length > 0) {
+                        message += '\\nErrors:\\n' + result.errors.join('\\n');
+                    }
+                    
+                    alert(message);
+                })
+                .catch(function(error) {
+                    alert('Test failed: ' + error.message);
+                });
         }
         
         async function updateStatus() {
@@ -2257,13 +2256,17 @@ HTML_TEMPLATE = '''
                     loansSection.style.display = 'block';
                     
                     loansGrid.innerHTML = '';
-                    for (const [asset, amount] of Object.entries(balanceData.loans)) {
+                    for (const asset in balanceData.loans) {
+                        const amount = balanceData.loans[asset];
                         const loanItem = document.createElement('div');
                         loanItem.className = 'loan-item';
-                        loanItem.innerHTML = `
-                            <strong>${asset}</strong><br>
-                            ${amount.toLocaleString(undefined, {minimumFractionDigits: 4})}
-                        `;
+                        const strong = document.createElement('strong');
+                        strong.textContent = asset;
+                        const br = document.createElement('br');
+                        const text = document.createTextNode(amount.toLocaleString(undefined, {minimumFractionDigits: 4}));
+                        loanItem.appendChild(strong);
+                        loanItem.appendChild(br);
+                        loanItem.appendChild(text);
                         loansGrid.appendChild(loanItem);
                     }
                 } else {
@@ -2286,7 +2289,7 @@ HTML_TEMPLATE = '''
                         else if (pos.ltv > 0.60) ltvClass = 'ltv-warning';
                         
                         // Determine P&L class
-                        let pnlClass = pos.pnl_percent >= 0 ? 'pnl-positive' : 'pnl-negative';
+                        const pnlClass = pos.pnl_percent >= 0 ? 'pnl-positive' : 'pnl-negative';
                         
                         row.innerHTML = `
                             <td><strong>Level ${pos.level}</strong></td>
@@ -2314,6 +2317,12 @@ HTML_TEMPLATE = '''
                 // Don't throw, just log it
             }
         }
+        
+        // Define all functions in window scope to ensure they're accessible
+        window.startEarnLeverage = startEarnLeverage;
+        window.stopTrading = stopTrading;
+        window.updateStatus = updateStatus;
+        window.testConnection = testConnection;
         
         // Auto-refresh every 15 seconds
         setInterval(updateStatus, 15000);
