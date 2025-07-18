@@ -12,7 +12,6 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, jsonify, request, render_template_string
 import threading
-import pickle
 
 @dataclass
 class AssetConfig:
@@ -61,8 +60,7 @@ class BinanceAPI:
             '/api/v3/ping',
             '/api/v3/time',
             '/api/v3/ticker/price',
-            '/api/v3/exchangeInfo',
-            '/sapi/v1/loan/flexible/data'
+            '/api/v3/exchangeInfo'
         }
     
     def _generate_signature(self, query_string: str) -> str:
@@ -104,13 +102,13 @@ class BinanceAPI:
                 return result
             else:
                 error_msg = response.text
-                self.logger.error(f"❌ {endpoint} failed: {response.status_code} - {error_msg}")
+                self.logger.error(f"❌ {endpoint} failed: {response.status_code} - {error_msg[:200]}")
                 
                 try:
                     error_data = response.json()
                     return {"error": f"HTTP {response.status_code}", "message": error_data.get('msg', error_msg), "code": error_data.get('code', response.status_code)}
                 except:
-                    return {"error": f"HTTP {response.status_code}", "message": error_msg}
+                    return {"error": f"HTTP {response.status_code}", "message": error_msg[:200]}
                 
         except requests.exceptions.Timeout:
             self.logger.error(f"❌ {endpoint} timeout")
@@ -185,6 +183,9 @@ class BinanceAPI:
     
     def purchase_savings_product(self, product_id: str, amount: float) -> Dict:
         """Subscribe to flexible savings product"""
+        if not product_id:
+            return {"error": "No product ID", "message": "Product ID is required"}
+            
         params = {
             'productId': product_id,
             'amount': f"{amount:.8f}".rstrip('0').rstrip('.')
@@ -236,7 +237,7 @@ class BinanceAPI:
         if collateral_coin:
             params['collateralCoin'] = collateral_coin
             
-        return self._make_request("/sapi/v1/loan/flexible/data", params, require_auth=False)
+        return self._make_request("/sapi/v1/loan/flexible/data", params, require_auth=True)
     
     def get_collateral_data(self, collateral_coin: str = None) -> List[Dict]:
         """Get collateral asset data including LTV ratios"""
@@ -342,6 +343,12 @@ class EarnWalletLeverageBot:
         )
         self.logger = logging.getLogger(__name__)
         
+        self.logger.info("="*50)
+        self.logger.info("🚀 INITIALIZING EARN WALLET LEVERAGE BOT")
+        self.logger.info(f"📍 Mode: {'TESTNET' if testnet else 'PRODUCTION'}")
+        self.logger.info(f"🔑 API Key: {api_key[:8]}...")
+        self.logger.info("="*50)
+        
         # Initialize API
         self.binance_api = BinanceAPI(api_key, api_secret, testnet)
         
@@ -377,25 +384,37 @@ class EarnWalletLeverageBot:
         
         # Persistence
         self.positions_file = 'positions.json'
-        self._load_positions()
+        try:
+            self._load_positions()
+        except Exception as e:
+            self.logger.error(f"Error loading positions: {e}")
+            self.positions = []
         
         # Load initial data
         self.logger.info("🚀 Initializing bot - loading market data...")
-        self._update_price_cache()
-        self._load_savings_products()
-        self._load_loan_data()
+        try:
+            self._update_price_cache()
+            self._load_savings_products()
+            self._load_loan_data()
+        except Exception as e:
+            self.logger.error(f"❌ Error loading initial data: {e}")
         
         # Test connection on startup
-        test_results = self.test_connection()
-        if not test_results['connection']:
-            self.logger.error("❌ Failed to connect to Binance API")
-        if not test_results['savings']:
-            self.logger.warning("⚠️ No savings products available - will use margin trading instead")
-            self.use_margin_only = True
-        else:
-            self.use_margin_only = False
-        if not test_results['loans']:
-            self.logger.warning("⚠️ Loan data unavailable - using default rates")
+        try:
+            test_results = self.test_connection()
+            if not test_results['connection']:
+                self.logger.error("❌ Failed to connect to Binance API")
+            if not test_results['savings']:
+                self.logger.warning("⚠️ No savings products available - will use margin trading instead")
+                self.use_margin_only = True
+            else:
+                self.use_margin_only = False
+            if not test_results['loans']:
+                self.logger.warning("⚠️ Loan data unavailable - using default rates")
+            
+            self.logger.info("✅ Bot initialization complete")
+        except Exception as e:
+            self.logger.error(f"❌ Error testing connection: {e}")
     
     def _initialize_asset_config(self) -> Dict[str, AssetConfig]:
         """Asset configuration - ONLY real Binance assets that exist on Earn"""
@@ -505,9 +524,10 @@ class EarnWalletLeverageBot:
                     
                     symbol = f"{asset}USDT"
                     for price_data in all_prices:
-                        if price_data.get('symbol') == symbol:
+                        if isinstance(price_data, dict) and price_data.get('symbol') == symbol:
                             try:
-                                self.price_cache[symbol] = float(price_data['price'])
+                                price = price_data.get('price', '0')
+                                self.price_cache[symbol] = float(price)
                                 break
                             except (ValueError, TypeError):
                                 continue
@@ -515,9 +535,11 @@ class EarnWalletLeverageBot:
                 self.logger.info(f"📊 Price cache updated: {len(self.price_cache)} assets")
             else:
                 self.logger.warning("Failed to get price data from API")
+                # Set some default prices to prevent complete failure
+                self.price_cache = {'USDTUSDT': 1.0}
         except Exception as e:
             self.logger.error(f"Error updating price cache: {e}")
-            self.price_cache = {}
+            self.price_cache = {'USDTUSDT': 1.0}
     
     def _load_savings_products(self):
         """Load available savings products (Simple Earn)"""
@@ -533,22 +555,38 @@ class EarnWalletLeverageBot:
                     self.logger.info(f"📋 Sample product structure: {products[0]}")
                 
                 for product in products:
-                    asset = product.get('asset', '')
-                    # Check multiple possible status fields
-                    status = product.get('status', product.get('featured', product.get('purchasable', False)))
+                    # Handle different product structures
+                    asset = None
+                    product_id = None
+                    status = None
+                    
+                    if isinstance(product, dict):
+                        asset = product.get('asset', '')
+                        product_id = product.get('productId', product.get('id', ''))
+                        # Check multiple possible status fields
+                        status = product.get('status', product.get('featured', product.get('purchasable', False)))
+                    elif isinstance(product, str):
+                        # If product is just a string, assume it's the asset name
+                        asset = product
+                        product_id = f"{asset}001"
+                        status = True
                     
                     # Log each product being checked
-                    self.logger.debug(f"Checking product: {asset} - Status: {status}")
+                    self.logger.debug(f"Checking product: {asset} - Status: {status} - ID: {product_id}")
                     
                     # Include products for our configured assets and borrowing assets
                     all_assets = list(self.asset_config.keys()) + self.borrowing_assets
                     
                     # More flexible status check
-                    valid_status = status in ['PURCHASING', True, 'true', 'TRUE', '1', 1]
+                    valid_status = status in ['PURCHASING', True, 'true', 'TRUE', '1', 1, 'AVAILABLE', 'available']
                     
                     if asset and valid_status and asset in all_assets:
-                        self.savings_products_cache[asset] = product
-                        self.logger.info(f"✅ Added {asset} to savings products cache")
+                        self.savings_products_cache[asset] = {
+                            'asset': asset,
+                            'productId': product_id,
+                            'status': status
+                        }
+                        self.logger.info(f"✅ Added {asset} to savings products cache with ID: {product_id}")
                 
                 self.logger.info(f"💰 Loaded {len(self.savings_products_cache)} savings products")
                 
@@ -575,9 +613,9 @@ class EarnWalletLeverageBot:
         self.logger.info("🔄 Using fallback method for savings products")
         self.savings_products_cache = {}
         
-        # Assume all our configured assets have savings products
+        # Assume all our configured assets have savings products (except USDT)
         for asset in self.asset_config.keys():
-            if asset != 'USDT':  # Skip USDT as collateral
+            if asset not in ['USDT', 'USDC', 'BUSD']:  # Skip stablecoins as collateral
                 self.savings_products_cache[asset] = {
                     'asset': asset,
                     'productId': f"{asset}001",  # Placeholder ID
@@ -594,40 +632,62 @@ class EarnWalletLeverageBot:
             
             # Get loan data for each borrowing asset
             for loan_asset in self.borrowing_assets:
-                loan_data = self.binance_api.get_loan_data(loan_coin=loan_asset)
-                if loan_data and "rows" in loan_data:
-                    for row in loan_data["rows"]:
-                        collateral = row.get('collateralCoin', '')
-                        if collateral in self.asset_config:
-                            key = f"{collateral}_{loan_asset}"
-                            self.loan_data_cache[key] = {
-                                'loan_asset': loan_asset,
-                                'collateral_asset': collateral,
-                                'hourly_rate': float(row.get('flexibleDailyInterestRate', 0)) / 24,
-                                'daily_rate': float(row.get('flexibleDailyInterestRate', 0)),
-                                'yearly_rate': float(row.get('flexibleDailyInterestRate', 0)) * 365,
-                                'min_limit': float(row.get('flexibleMinLimit', 0)),
-                                'max_limit': float(row.get('flexibleMaxLimit', 0))
-                            }
+                try:
+                    loan_data = self.binance_api.get_loan_data(loan_coin=loan_asset)
+                    if loan_data and isinstance(loan_data, dict) and "rows" in loan_data:
+                        for row in loan_data["rows"]:
+                            if not isinstance(row, dict):
+                                continue
+                                
+                            collateral = row.get('collateralCoin', '')
+                            if collateral in self.asset_config:
+                                key = f"{collateral}_{loan_asset}"
+                                
+                                # Safe float conversion with defaults
+                                try:
+                                    daily_rate = float(row.get('flexibleDailyInterestRate', 0))
+                                except:
+                                    daily_rate = 0.0
+                                
+                                self.loan_data_cache[key] = {
+                                    'loan_asset': loan_asset,
+                                    'collateral_asset': collateral,
+                                    'hourly_rate': daily_rate / 24 if daily_rate > 0 else 0.0,
+                                    'daily_rate': daily_rate,
+                                    'yearly_rate': daily_rate * 365 if daily_rate > 0 else 0.0,
+                                    'min_limit': float(row.get('flexibleMinLimit', 0)),
+                                    'max_limit': float(row.get('flexibleMaxLimit', 999999))
+                                }
+                except Exception as e:
+                    self.logger.warning(f"Error loading loan data for {loan_asset}: {e}")
             
             # Get collateral data
-            collateral_data = self.binance_api.get_collateral_data()
-            if collateral_data and isinstance(collateral_data, list):
-                self.collateral_data_cache = {}
-                for data in collateral_data:
-                    coin = data.get('collateralCoin', '')
-                    if coin in self.asset_config:
-                        self.collateral_data_cache[coin] = {
-                            'initial_ltv': float(data.get('initialLTV', 0)),
-                            'margin_call_ltv': float(data.get('marginCallLTV', 0)),
-                            'liquidation_ltv': float(data.get('liquidationLTV', 0)),
-                            'max_limit': float(data.get('maxLimit', 0))
-                        }
+            try:
+                collateral_data = self.binance_api.get_collateral_data()
+                if collateral_data and isinstance(collateral_data, list):
+                    self.collateral_data_cache = {}
+                    for data in collateral_data:
+                        if not isinstance(data, dict):
+                            continue
+                            
+                        coin = data.get('collateralCoin', '')
+                        if coin in self.asset_config:
+                            self.collateral_data_cache[coin] = {
+                                'initial_ltv': float(data.get('initialLTV', 0.5)),
+                                'margin_call_ltv': float(data.get('marginCallLTV', 0.75)),
+                                'liquidation_ltv': float(data.get('liquidationLTV', 0.85)),
+                                'max_limit': float(data.get('maxLimit', 999999))
+                            }
+            except Exception as e:
+                self.logger.warning(f"Error loading collateral data: {e}")
             
             self.logger.info(f"📊 Loaded loan data for {len(self.loan_data_cache)} pairs")
             
         except Exception as e:
             self.logger.error(f"Error loading loan data: {e}")
+            # Set some defaults if loan data fails
+            self.loan_data_cache = {}
+            self.collateral_data_cache = {}
     
     def _get_optimal_loan_asset(self, collateral_asset: str, loan_amount: float) -> Tuple[str, float]:
         """Get optimal loan asset based on rates and availability"""
@@ -686,10 +746,12 @@ class EarnWalletLeverageBot:
         # Fallback API call
         try:
             price_data = self.binance_api.get_symbol_price(symbol)
-            if "price" in price_data and "error" not in price_data:
+            if price_data and "price" in price_data and "error" not in price_data:
                 price = float(price_data['price'])
                 self.price_cache[symbol] = price
                 return price
+            else:
+                self.logger.warning(f"No price data for {symbol}: {price_data}")
         except Exception as e:
             self.logger.error(f"Error getting price for {symbol}: {e}")
         
@@ -699,9 +761,9 @@ class EarnWalletLeverageBot:
         """Get trading symbol information"""
         try:
             exchange_info = self.binance_api.get_exchange_info()
-            if "symbols" in exchange_info:
+            if exchange_info and "symbols" in exchange_info and isinstance(exchange_info["symbols"], list):
                 for s in exchange_info["symbols"]:
-                    if s["symbol"] == symbol:
+                    if isinstance(s, dict) and s.get("symbol") == symbol:
                         return s
         except Exception as e:
             self.logger.error(f"Error getting symbol info: {e}")
@@ -791,7 +853,7 @@ class EarnWalletLeverageBot:
             # Filter assets that have both price and savings product (or just price if margin mode)
             available_assets = []
             for asset_name, asset_config in self.asset_config.items():
-                if asset_name == 'USDT':
+                if asset_name in ['USDT', 'USDC', 'BUSD']:  # Skip stablecoins as collateral
                     continue
                     
                 price = self._get_asset_price(asset_name)
@@ -965,11 +1027,11 @@ class EarnWalletLeverageBot:
                         
                         return True, max_loan_amount
                     else:
-                        self.logger.error(f"❌ Margin borrow failed: {margin_borrow_result['message']}")
+                        self.logger.error(f"❌ Margin borrow failed: {margin_borrow_result.get('message', 'Unknown error')}")
                         self._emergency_sell(asset, quantity)
                         return False, 0
                 else:
-                    self.logger.error(f"❌ Margin transfer failed: {transfer_result['message']}")
+                    self.logger.error(f"❌ Margin transfer failed: {transfer_result.get('message', 'Unknown error')}")
                     self._emergency_sell(asset, quantity)
                     return False, 0
             
@@ -1022,7 +1084,8 @@ class EarnWalletLeverageBot:
             )
             
             if "error" in loan_result:
-                self.logger.error(f"❌ CRYPTO LOAN FAILED: {loan_result['message']}")
+                error_msg = loan_result.get('message', 'Unknown error') if isinstance(loan_result, dict) else str(loan_result)
+                self.logger.error(f"❌ CRYPTO LOAN FAILED: {error_msg}")
                 
                 # If loan failed and we deposited to savings, try to withdraw
                 if product_id and deposit_result and "error" not in deposit_result:
@@ -1073,9 +1136,11 @@ class EarnWalletLeverageBot:
                             
                             return True, max_loan_amount
                         else:
-                            self.logger.error(f"❌ Margin borrow failed: {margin_borrow_result['message']}")
+                            self.logger.error(f"❌ Margin borrow failed: {margin_borrow_result.get('message', 'Unknown error')}")
                     else:
-                        self.logger.error(f"❌ Margin transfer failed: {transfer_result['message']}")
+                        self.logger.error(f"❌ Margin transfer failed: {transfer_result.get('message', 'Unknown error')}")
+                else:
+                    self.logger.warning("⚠️ Margin fallback disabled")
                 
                 # If all fails, sell back the asset
                 self._emergency_sell(asset, quantity)
@@ -1532,38 +1597,55 @@ class EarnWalletLeverageBot:
             if not ping.get("error"):
                 results['connection'] = True
                 self.logger.info("✅ API connection successful")
+            else:
+                results['errors'].append(f"Connection error: {ping.get('message', 'Unknown')}")
             
             # Test account access
-            account = self.binance_api.get_account_info()
-            if not account.get("error"):
-                results['account'] = True
-                results['permissions'] = account.get('permissions', [])
-                results['spot_trading'] = 'SPOT' in results['permissions']
-                self.logger.info(f"✅ Account access successful. Permissions: {results['permissions']}")
-            else:
-                results['errors'].append(f"Account error: {account.get('message')}")
+            try:
+                account = self.binance_api.get_account_info()
+                if not account.get("error"):
+                    results['account'] = True
+                    results['permissions'] = account.get('permissions', [])
+                    results['spot_trading'] = 'SPOT' in results['permissions']
+                    self.logger.info(f"✅ Account access successful. Permissions: {results['permissions']}")
+                else:
+                    results['errors'].append(f"Account error: {account.get('message', 'Unknown')}")
+            except Exception as e:
+                results['errors'].append(f"Account test error: {str(e)}")
             
             # Test price data
-            prices = self.binance_api.get_all_prices()
-            if prices and len(prices) > 0:
-                results['prices'] = True
-                self.logger.info(f"✅ Price data available: {len(prices)} symbols")
+            try:
+                prices = self.binance_api.get_all_prices()
+                if prices and len(prices) > 0:
+                    results['prices'] = True
+                    self.logger.info(f"✅ Price data available: {len(prices)} symbols")
+                else:
+                    results['errors'].append("No price data received")
+            except Exception as e:
+                results['errors'].append(f"Price test error: {str(e)}")
             
             # Test savings products
-            savings = self.binance_api.get_savings_products()
-            if savings and len(savings) > 0:
-                results['savings'] = True
-                self.logger.info(f"✅ Savings products available: {len(savings)} products")
-            else:
-                results['errors'].append("No savings products found")
+            try:
+                savings = self.binance_api.get_savings_products()
+                if savings and len(savings) > 0:
+                    results['savings'] = True
+                    self.logger.info(f"✅ Savings products available: {len(savings)} products")
+                else:
+                    results['errors'].append("No savings products found")
+            except Exception as e:
+                results['errors'].append(f"Savings test error: {str(e)}")
             
             # Test loan data
-            loan_data = self.binance_api.get_loan_data()
-            if loan_data and not loan_data.get("error"):
-                results['loans'] = True
-                self.logger.info("✅ Loan data available")
-            else:
-                results['errors'].append(f"Loan data error: {loan_data.get('message', 'Unknown')}")
+            try:
+                loan_data = self.binance_api.get_loan_data()
+                if loan_data and not loan_data.get("error"):
+                    results['loans'] = True
+                    self.logger.info("✅ Loan data available")
+                else:
+                    error_msg = loan_data.get('message', 'Unknown') if loan_data else 'No response'
+                    results['errors'].append(f"Loan data error: {error_msg}")
+            except Exception as e:
+                results['errors'].append(f"Loan test error: {str(e)}")
             
         except Exception as e:
             results['errors'].append(f"Test error: {str(e)}")
@@ -2074,17 +2156,22 @@ HTML_TEMPLATE = '''
                 const response = await fetch('/test');
                 const result = await response.json();
                 
-                let message = 'Connection Test Results:\\n\\n';
-                message += `✓ API Connection: ${result.connection ? 'SUCCESS' : 'FAILED'}\\n`;
-                message += `✓ Account Access: ${result.account ? 'SUCCESS' : 'FAILED'}\\n`;
-                message += `✓ Permissions: ${result.permissions.join(', ') || 'None'}\\n`;
-                message += `✓ Spot Trading: ${result.spot_trading ? 'ENABLED' : 'DISABLED'}\\n`;
-                message += `✓ Price Data: ${result.prices ? 'AVAILABLE' : 'UNAVAILABLE'}\\n`;
-                message += `✓ Savings Products: ${result.savings ? 'AVAILABLE' : 'UNAVAILABLE'}\\n`;
-                message += `✓ Loan Data: ${result.loans ? 'AVAILABLE' : 'UNAVAILABLE'}\\n`;
+                if (result.error) {
+                    alert(`❌ Error: ${result.error}`);
+                    return;
+                }
+                
+                let message = 'Connection Test Results:\n\n';
+                message += `✓ API Connection: ${result.connection ? 'SUCCESS' : 'FAILED'}\n`;
+                message += `✓ Account Access: ${result.account ? 'SUCCESS' : 'FAILED'}\n`;
+                message += `✓ Permissions: ${result.permissions && result.permissions.length > 0 ? result.permissions.join(', ') : 'None'}\n`;
+                message += `✓ Spot Trading: ${result.spot_trading ? 'ENABLED' : 'DISABLED'}\n`;
+                message += `✓ Price Data: ${result.prices ? 'AVAILABLE' : 'UNAVAILABLE'}\n`;
+                message += `✓ Savings Products: ${result.savings ? 'AVAILABLE' : 'UNAVAILABLE'}\n`;
+                message += `✓ Loan Data: ${result.loans ? 'AVAILABLE' : 'UNAVAILABLE'}\n`;
                 
                 if (result.errors && result.errors.length > 0) {
-                    message += `\\n❌ Errors:\\n${result.errors.join('\\n')}`;
+                    message += `\n❌ Errors:\n${result.errors.join('\n')}`;
                 }
                 
                 alert(message);
@@ -2100,41 +2187,68 @@ HTML_TEMPLATE = '''
                     fetch('/balances')
                 ]);
                 
-                const statusData = await statusResponse.json();
-                const balanceData = await balanceResponse.json();
+                // Check if responses are ok
+                if (!statusResponse.ok) {
+                    console.error('Status response error:', statusResponse.status);
+                    return;
+                }
+                
+                if (!balanceResponse.ok) {
+                    console.error('Balance response error:', balanceResponse.status);
+                    return;
+                }
+                
+                // Parse JSON safely
+                let statusData, balanceData;
+                
+                try {
+                    statusData = await statusResponse.json();
+                } catch (e) {
+                    console.error('Error parsing status data:', e);
+                    return;
+                }
+                
+                try {
+                    balanceData = await balanceResponse.json();
+                } catch (e) {
+                    console.error('Error parsing balance data:', e);
+                    balanceData = { balances: {}, loans: {} };
+                }
                 
                 // Update metrics
-                document.getElementById('total-capital').textContent = statusData.total_capital.toLocaleString(undefined, {minimumFractionDigits: 2});
-                document.getElementById('leveraged-capital').textContent = statusData.leveraged_capital.toLocaleString(undefined, {minimumFractionDigits: 2});
-                document.getElementById('net-value').textContent = statusData.net_portfolio_value.toLocaleString(undefined, {minimumFractionDigits: 2});
-                document.getElementById('total-yield').textContent = statusData.total_yield.toFixed(2);
-                document.getElementById('position-count').textContent = statusData.total_positions;
+                document.getElementById('total-capital').textContent = (statusData.total_capital || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+                document.getElementById('leveraged-capital').textContent = (statusData.leveraged_capital || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+                document.getElementById('net-value').textContent = (statusData.net_portfolio_value || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+                document.getElementById('total-yield').textContent = (statusData.total_yield || 0).toFixed(2);
+                document.getElementById('position-count').textContent = statusData.total_positions || 0;
                 
                 // Update bot status
                 const statusElement = document.getElementById('bot-status');
-                statusElement.textContent = statusData.bot_status;
+                statusElement.textContent = statusData.bot_status || 'Unknown';
                 statusElement.className = 'status-indicator status-' + 
-                    statusData.bot_status.toLowerCase().replace(/[^a-z]/g, '-').replace(/-+/g, '-');
+                    (statusData.bot_status || 'unknown').toLowerCase().replace(/[^a-z]/g, '-').replace(/-+/g, '-');
                 
                 // Show/hide monitoring status
                 const monitoringStatus = document.getElementById('monitoring-status');
-                if (statusData.bot_status.includes('Active') || statusData.bot_status.includes('Resumed')) {
+                if (statusData.bot_status && (statusData.bot_status.includes('Active') || statusData.bot_status.includes('Resumed'))) {
                     monitoringStatus.style.display = 'flex';
                 } else {
                     monitoringStatus.style.display = 'none';
                 }
                 
                 // Update balances
-                const usdtBalance = balanceData.balances['USDT'];
-                if (usdtBalance) {
+                if (balanceData.balances && balanceData.balances['USDT']) {
+                    const usdtBalance = balanceData.balances['USDT'];
                     document.getElementById('available-usdt').textContent = 
-                        usdtBalance.spot_free.toLocaleString(undefined, {minimumFractionDigits: 2});
+                        (usdtBalance.spot_free || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+                } else {
+                    document.getElementById('available-usdt').textContent = '0.00';
                 }
                 
                 document.getElementById('total-loans').textContent = 
-                    statusData.leveraged_capital.toLocaleString(undefined, {minimumFractionDigits: 2});
+                    (statusData.leveraged_capital || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
                 document.getElementById('net-portfolio').textContent = 
-                    statusData.net_portfolio_value.toLocaleString(undefined, {minimumFractionDigits: 2});
+                    (statusData.net_portfolio_value || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
                 
                 // Update loans section
                 if (balanceData.loans && Object.keys(balanceData.loans).length > 0) {
@@ -2160,7 +2274,7 @@ HTML_TEMPLATE = '''
                 const tbody = document.getElementById('positions-body');
                 tbody.innerHTML = '';
                 
-                if (statusData.positions.length === 0) {
+                if (!statusData.positions || statusData.positions.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="10" style="text-align: center; color: #666;">No earn positions</td></tr>';
                 } else {
                     statusData.positions.forEach(pos => {
@@ -2182,27 +2296,46 @@ HTML_TEMPLATE = '''
                             <td><span class="loan-asset">${pos.loan_asset}</span></td>
                             <td><span class="loan-rate">${pos.loan_rate}</span></td>
                             <td class="${ltvClass}">${(pos.ltv * 100).toFixed(1)}%</td>
-                            <td>$${pos.usd_value.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                            <td>${pos.usd_value.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
                             <td class="${pnlClass}">${pos.pnl_percent >= 0 ? '+' : ''}${pos.pnl_percent.toFixed(2)}%</td>
                             <td><small>${pos.loan_order_id || 'N/A'}</small></td>
                         `;
                         tbody.appendChild(row);
                     });
                 }
+                
+                // Show error if present
+                if (balanceData.error) {
+                    console.error('Balance error:', balanceData.error);
+                }
+                
             } catch (error) {
                 console.error('Error updating status:', error);
+                // Don't throw, just log it
             }
         }
         
         // Auto-refresh every 15 seconds
         setInterval(updateStatus, 15000);
         
-        // Initial load
-        updateStatus();
+        // Initial load after a short delay
+        setTimeout(updateStatus, 1000);
     </script>
 </body>
 </html>
 '''
+
+@app.route('/health')
+def health_check():
+    """Simple health check endpoint"""
+    return jsonify({
+        'status': 'ok',
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/favicon.ico')
+def favicon():
+    return '', 204  # No content
 
 @app.route('/')
 def index():
@@ -2228,7 +2361,12 @@ def start_trading():
         
         # Start earn leverage in background
         def start_async():
-            asyncio.run(bot.start_trading(capital))
+            try:
+                asyncio.run(bot.start_trading(capital))
+            except Exception as e:
+                bot.logger.error(f"Trading thread error: {e}")
+                bot.bot_status = f"Error: {str(e)}"
+                bot._save_positions()
         
         thread = threading.Thread(target=start_async)
         thread.start()
@@ -2251,11 +2389,24 @@ def stop_trading():
 @app.route('/status')
 def get_status():
     global bot
-    if bot:
-        return jsonify(bot.get_portfolio_status())
-    else:
+    try:
+        if bot:
+            return jsonify(bot.get_portfolio_status())
+        else:
+            return jsonify({
+                'bot_status': 'Stopped',
+                'total_positions': 0,
+                'total_capital': 0,
+                'leveraged_capital': 0,
+                'net_portfolio_value': 0,
+                'total_yield': 0,
+                'leverage_ratio': 0,
+                'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'positions': []
+            })
+    except Exception as e:
         return jsonify({
-            'bot_status': 'Stopped',
+            'bot_status': f'Error: {str(e)}',
             'total_positions': 0,
             'total_capital': 0,
             'leveraged_capital': 0,
@@ -2263,49 +2414,73 @@ def get_status():
             'total_yield': 0,
             'leverage_ratio': 0,
             'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'positions': []
+            'positions': [],
+            'error': str(e)
         })
 
 @app.route('/balances')
 def get_balances():
     global bot
     
-    if not bot:
-        api_key = os.getenv('BINANCE_API_KEY')
-        api_secret = os.getenv('BINANCE_API_SECRET')
-        testnet = os.getenv('BINANCE_TESTNET', 'false').lower() == 'true'
+    try:
+        if not bot:
+            api_key = os.getenv('BINANCE_API_KEY')
+            api_secret = os.getenv('BINANCE_API_SECRET')
+            testnet = os.getenv('BINANCE_TESTNET', 'false').lower() == 'true'
+            
+            if not api_key or not api_secret:
+                return jsonify({'total_usd_value': 0, 'balances': {}, 'loans': {}, 'error': 'No API credentials'})
+            
+            bot = EarnWalletLeverageBot(api_key, api_secret, testnet)
         
-        if not api_key or not api_secret:
-            return jsonify({'total_usd_value': 0, 'balances': {}, 'loans': {}, 'error': 'No API credentials'})
-        
-        bot = EarnWalletLeverageBot(api_key, api_secret, testnet)
-    
-    return jsonify(bot.get_account_balances())
+        return jsonify(bot.get_account_balances())
+    except Exception as e:
+        return jsonify({
+            'total_usd_value': 0, 
+            'balances': {}, 
+            'loans': {}, 
+            'error': f'Balance fetch error: {str(e)}'
+        })
 
 @app.route('/test')
 def test_connection():
     global bot
     
-    api_key = os.getenv('BINANCE_API_KEY')
-    api_secret = os.getenv('BINANCE_API_SECRET')
-    testnet = os.getenv('BINANCE_TESTNET', 'false').lower() == 'true'
-    
-    if not api_key or not api_secret:
-        return jsonify({'error': 'No API credentials configured'})
-    
-    if not bot:
-        bot = EarnWalletLeverageBot(api_key, api_secret, testnet)
-    
-    return jsonify(bot.test_connection())
+    try:
+        api_key = os.getenv('BINANCE_API_KEY')
+        api_secret = os.getenv('BINANCE_API_SECRET')
+        testnet = os.getenv('BINANCE_TESTNET', 'false').lower() == 'true'
+        
+        if not api_key or not api_secret:
+            return jsonify({'error': 'No API credentials configured'})
+        
+        # Validate API key format
+        if len(api_key) < 10 or len(api_secret) < 10:
+            return jsonify({'error': 'Invalid API credentials format'})
+        
+        if not bot:
+            bot = EarnWalletLeverageBot(api_key, api_secret, testnet)
+        
+        return jsonify(bot.test_connection())
+    except Exception as e:
+        return jsonify({'error': f'Test connection failed: {str(e)}'})
 
 if __name__ == '__main__':
     # Initialize bot on startup if credentials exist
-    api_key = os.getenv('BINANCE_API_KEY')
-    api_secret = os.getenv('BINANCE_API_SECRET')
-    testnet = os.getenv('BINANCE_TESTNET', 'false').lower() == 'true'
-    
-    if api_key and api_secret:
-        bot = EarnWalletLeverageBot(api_key, api_secret, testnet)
+    try:
+        api_key = os.getenv('BINANCE_API_KEY')
+        api_secret = os.getenv('BINANCE_API_SECRET')
+        testnet = os.getenv('BINANCE_TESTNET', 'false').lower() == 'true'
+        
+        if api_key and api_secret:
+            bot = EarnWalletLeverageBot(api_key, api_secret, testnet)
+            print("✅ Bot initialized successfully")
+        else:
+            print("⚠️ No API credentials configured - bot will be initialized on first request")
+    except Exception as e:
+        print(f"❌ Error initializing bot: {e}")
+        bot = None
     
     port = int(os.environ.get('PORT', 8080))
+    print(f"🚀 Starting Earn Wallet Leverage Bot on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
