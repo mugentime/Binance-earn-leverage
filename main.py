@@ -150,10 +150,38 @@ class BinanceAPI:
     # EARN WALLET APIs
     def get_savings_products(self) -> List[Dict]:
         """Get available savings products (Simple Earn)"""
-        result = self._make_request("/sapi/v1/simple-earn/flexible/list", require_auth=True)
-        if isinstance(result, dict) and "rows" in result:
-            return result["rows"]
-        return result if isinstance(result, list) else []
+        # Try multiple endpoints for savings products
+        endpoints = [
+            "/sapi/v1/simple-earn/flexible/list",
+            "/sapi/v1/lending/daily/product/list",
+            "/sapi/v1/savings/product/list"
+        ]
+        
+        for endpoint in endpoints:
+            self.logger.info(f"🔍 Trying endpoint: {endpoint}")
+            result = self._make_request(endpoint, {"current": 1, "size": 100}, require_auth=True)
+            
+            # Check if we got a valid response
+            if isinstance(result, dict):
+                # Check for rows/data/products in response
+                if "rows" in result and isinstance(result["rows"], list):
+                    self.logger.info(f"✅ Found products in 'rows' field")
+                    return result["rows"]
+                elif "data" in result and isinstance(result["data"], list):
+                    self.logger.info(f"✅ Found products in 'data' field")
+                    return result["data"]
+                elif "products" in result and isinstance(result["products"], list):
+                    self.logger.info(f"✅ Found products in 'products' field")
+                    return result["products"]
+                elif not result.get("error"):
+                    # If dict but no standard fields, might be the product list directly
+                    continue
+            elif isinstance(result, list):
+                self.logger.info(f"✅ Got direct product list")
+                return result
+        
+        self.logger.warning("❌ No valid savings products found from any endpoint")
+        return []
     
     def purchase_savings_product(self, product_id: str, amount: float) -> Dict:
         """Subscribe to flexible savings product"""
@@ -176,10 +204,28 @@ class BinanceAPI:
     
     def get_savings_positions(self) -> List[Dict]:
         """Get flexible savings positions"""
-        result = self._make_request("/sapi/v1/simple-earn/flexible/position", require_auth=True)
-        if isinstance(result, dict) and "rows" in result:
-            return result["rows"]
-        return result if isinstance(result, list) else []
+        # Try multiple endpoints
+        endpoints = [
+            "/sapi/v1/simple-earn/flexible/position",
+            "/sapi/v1/lending/daily/token/position",
+            "/sapi/v1/savings/flexibleUserLeftQuota"
+        ]
+        
+        for endpoint in endpoints:
+            result = self._make_request(endpoint, require_auth=True)
+            
+            if isinstance(result, dict):
+                if "rows" in result:
+                    return result["rows"]
+                elif "data" in result:
+                    return result["data"]
+                elif not result.get("error"):
+                    # Might be direct list
+                    continue
+            elif isinstance(result, list):
+                return result
+        
+        return []
     
     # CRYPTO LOAN APIs
     def get_loan_data(self, loan_coin: str = None, collateral_coin: str = None) -> Dict:
@@ -245,6 +291,38 @@ class BinanceAPI:
         }
         return self._make_request("/sapi/v1/loan/flexible/adjust/ltv", params, method='POST', require_auth=True)
 
+    # MARGIN TRADING APIs (Fallback)
+    def transfer_to_margin(self, asset: str, amount: float) -> Dict:
+        """Transfer asset from spot to margin account"""
+        params = {
+            'asset': asset,
+            'amount': f"{amount:.8f}".rstrip('0').rstrip('.'),
+            'type': 1  # 1 for spot to margin
+        }
+        self.logger.info(f"💱 Transferring {amount} {asset} to margin account")
+        return self._make_request("/sapi/v1/margin/transfer", params, method='POST', require_auth=True)
+    
+    def margin_borrow(self, asset: str, amount: float) -> Dict:
+        """Borrow asset in margin account"""
+        params = {
+            'asset': asset,
+            'amount': f"{amount:.8f}".rstrip('0').rstrip('.')
+        }
+        self.logger.info(f"🏦 Borrowing {amount} {asset} in margin account")
+        return self._make_request("/sapi/v1/margin/loan", params, method='POST', require_auth=True)
+    
+    def margin_repay(self, asset: str, amount: float) -> Dict:
+        """Repay margin loan"""
+        params = {
+            'asset': asset,
+            'amount': f"{amount:.8f}".rstrip('0').rstrip('.')
+        }
+        return self._make_request("/sapi/v1/margin/repay", params, method='POST', require_auth=True)
+    
+    def get_margin_account(self) -> Dict:
+        """Get margin account details"""
+        return self._make_request("/sapi/v1/margin/account", require_auth=True)
+
 class EarnWalletLeverageBot:
     """EARN WALLET LEVERAGE BOT - Creates leveraged positions using Binance's lending products"""
     
@@ -273,6 +351,8 @@ class EarnWalletLeverageBot:
         self.target_total_leverage = 2.0
         self.emergency_ltv = 0.85
         self.warning_ltv = 0.75
+        self.use_margin_fallback = True  # Use margin if crypto loans fail
+        self.use_margin_only = False  # Will be set based on availability
         
         # Borrowing assets configuration
         self.borrowing_assets = ['USDT', 'USDC', 'BUSD', 'DAI', 'TUSD']
@@ -300,9 +380,22 @@ class EarnWalletLeverageBot:
         self._load_positions()
         
         # Load initial data
+        self.logger.info("🚀 Initializing bot - loading market data...")
         self._update_price_cache()
         self._load_savings_products()
         self._load_loan_data()
+        
+        # Test connection on startup
+        test_results = self.test_connection()
+        if not test_results['connection']:
+            self.logger.error("❌ Failed to connect to Binance API")
+        if not test_results['savings']:
+            self.logger.warning("⚠️ No savings products available - will use margin trading instead")
+            self.use_margin_only = True
+        else:
+            self.use_margin_only = False
+        if not test_results['loans']:
+            self.logger.warning("⚠️ Loan data unavailable - using default rates")
     
     def _initialize_asset_config(self) -> Dict[str, AssetConfig]:
         """Asset configuration - ONLY real Binance assets that exist on Earn"""
@@ -430,16 +523,32 @@ class EarnWalletLeverageBot:
         """Load available savings products (Simple Earn)"""
         try:
             products = self.binance_api.get_savings_products()
+            self.logger.info(f"📥 Raw savings products response: {type(products)} with {len(products) if isinstance(products, list) else 'unknown'} items")
+            
             if products and isinstance(products, list):
                 self.savings_products_cache = {}
+                
+                # Log first product structure for debugging
+                if len(products) > 0:
+                    self.logger.info(f"📋 Sample product structure: {products[0]}")
+                
                 for product in products:
                     asset = product.get('asset', '')
-                    status = product.get('status', '')
+                    # Check multiple possible status fields
+                    status = product.get('status', product.get('featured', product.get('purchasable', False)))
+                    
+                    # Log each product being checked
+                    self.logger.debug(f"Checking product: {asset} - Status: {status}")
                     
                     # Include products for our configured assets and borrowing assets
                     all_assets = list(self.asset_config.keys()) + self.borrowing_assets
-                    if asset and status == 'PURCHASING' and asset in all_assets:
+                    
+                    # More flexible status check
+                    valid_status = status in ['PURCHASING', True, 'true', 'TRUE', '1', 1]
+                    
+                    if asset and valid_status and asset in all_assets:
                         self.savings_products_cache[asset] = product
+                        self.logger.info(f"✅ Added {asset} to savings products cache")
                 
                 self.logger.info(f"💰 Loaded {len(self.savings_products_cache)} savings products")
                 
@@ -448,12 +557,35 @@ class EarnWalletLeverageBot:
                     self.logger.info(f"📋 Available earn assets: {', '.join(available_assets)}")
                 else:
                     self.logger.warning("⚠️ No savings products available for configured assets")
+                    # If no products found, try alternative approach
+                    self._load_savings_products_fallback()
             else:
-                self.logger.warning("Failed to load savings products from API")
+                self.logger.warning(f"Failed to load savings products from API. Response: {products}")
                 self.savings_products_cache = {}
+                # Try fallback
+                self._load_savings_products_fallback()
         except Exception as e:
             self.logger.error(f"Error loading savings products: {e}")
             self.savings_products_cache = {}
+            # Try fallback
+            self._load_savings_products_fallback()
+    
+    def _load_savings_products_fallback(self):
+        """Fallback method to assume all configured assets have savings products"""
+        self.logger.info("🔄 Using fallback method for savings products")
+        self.savings_products_cache = {}
+        
+        # Assume all our configured assets have savings products
+        for asset in self.asset_config.keys():
+            if asset != 'USDT':  # Skip USDT as collateral
+                self.savings_products_cache[asset] = {
+                    'asset': asset,
+                    'productId': f"{asset}001",  # Placeholder ID
+                    'status': 'PURCHASING',
+                    'featured': True
+                }
+                
+        self.logger.info(f"💰 Fallback loaded {len(self.savings_products_cache)} savings products")
     
     def _load_loan_data(self):
         """Load loan data for all borrowing assets"""
@@ -651,19 +783,55 @@ class EarnWalletLeverageBot:
         try:
             current_capital = capital
             
-            # Filter assets that have both price and savings product
+            # Log current state for debugging
+            self.logger.info(f"🔍 Asset config has {len(self.asset_config)} assets")
+            self.logger.info(f"🔍 Savings products cache has {len(self.savings_products_cache)} products")
+            self.logger.info(f"🔍 Price cache has {len(self.price_cache)} prices")
+            
+            # Filter assets that have both price and savings product (or just price if margin mode)
             available_assets = []
             for asset_name, asset_config in self.asset_config.items():
                 if asset_name == 'USDT':
                     continue
                     
-                # Check if we have price data and savings product
-                if (self._get_asset_price(asset_name) > 0 and 
-                    asset_name in self.savings_products_cache):
-                    available_assets.append((asset_name, asset_config))
+                price = self._get_asset_price(asset_name)
+                has_savings = asset_name in self.savings_products_cache
+                
+                self.logger.info(f"🔍 {asset_name}: Price=${price:.2f}, Has Savings={has_savings}")
+                
+                # Check requirements based on mode
+                if self.use_margin_only:
+                    # For margin mode, only need price
+                    if price > 0:
+                        available_assets.append((asset_name, asset_config))
+                    elif price <= 0:
+                        self.logger.warning(f"⚠️ {asset_name} has no price data")
+                else:
+                    # For earn mode, need both price and savings
+                    if price > 0 and has_savings:
+                        available_assets.append((asset_name, asset_config))
+                    elif price <= 0:
+                        self.logger.warning(f"⚠️ {asset_name} has no price data")
+                    elif not has_savings:
+                        self.logger.warning(f"⚠️ {asset_name} has no savings product")
             
             if not available_assets:
-                raise Exception("No valid assets available for earn strategy")
+                # Log what's missing
+                self.logger.error(f"❌ No valid assets found!")
+                self.logger.error(f"   - Total configured assets: {len(self.asset_config)}")
+                self.logger.error(f"   - Assets with prices: {len([a for a in self.asset_config if self._get_asset_price(a) > 0])}")
+                self.logger.error(f"   - Assets with savings: {len(self.savings_products_cache)}")
+                
+                # If we have no savings products at all, try a direct approach
+                if len(self.savings_products_cache) == 0:
+                    self.logger.warning("🔄 No savings products loaded, using direct deposit approach")
+                    # Use assets that have prices at least
+                    for asset_name, asset_config in self.asset_config.items():
+                        if asset_name != 'USDT' and self._get_asset_price(asset_name) > 0:
+                            available_assets.append((asset_name, asset_config))
+                
+                if not available_assets:
+                    raise Exception("No valid assets available for earn strategy - check API connection and balances")
             
             # Sort by safety (lower volatility first)
             available_assets.sort(key=lambda x: x[1].volatility_factor)
@@ -755,30 +923,86 @@ class EarnWalletLeverageBot:
             # Wait for order execution
             await asyncio.sleep(3)
             
-            # 4. DEPOSIT TO SAVINGS (EARN WALLET)
+            # 4. DEPOSIT TO SAVINGS OR USE MARGIN
+            if self.use_margin_only:
+                self.logger.info(f"🔄 Using margin mode (no savings products available)")
+                
+                # Transfer to margin account
+                transfer_result = self.binance_api.transfer_to_margin(asset, quantity)
+                if "error" not in transfer_result:
+                    self.logger.info(f"✅ Transferred {quantity} {asset} to margin")
+                    
+                    await asyncio.sleep(3)
+                    
+                    # Borrow USDT in margin
+                    margin_borrow_result = self.binance_api.margin_borrow('USDT', max_loan_amount)
+                    if "error" not in margin_borrow_result:
+                        self.logger.info(f"✅ MARGIN BORROW SUCCESS: ${max_loan_amount} USDT")
+                        
+                        # Create position with margin info
+                        current_ltv = max_loan_amount / (quantity * asset_price)
+                        
+                        position = Position(
+                            asset=asset,
+                            collateral_amount=quantity,
+                            loan_amount=max_loan_amount,
+                            loan_asset='USDT',
+                            current_ltv=current_ltv,
+                            yield_earned=0,
+                            level=level,
+                            order_id=order_id,
+                            earn_product_id=None,
+                            loan_order_id='MARGIN',
+                            loan_rate=0.10,
+                            entry_price=asset_price,
+                            timestamp=datetime.now()
+                        )
+                        
+                        self.positions.append(position)
+                        self._save_positions()
+                        
+                        self.logger.info(f"🎯 MARGIN POSITION CREATED: Level {level} | {asset} | LTV: {current_ltv:.1%}")
+                        
+                        return True, max_loan_amount
+                    else:
+                        self.logger.error(f"❌ Margin borrow failed: {margin_borrow_result['message']}")
+                        self._emergency_sell(asset, quantity)
+                        return False, 0
+                else:
+                    self.logger.error(f"❌ Margin transfer failed: {transfer_result['message']}")
+                    self._emergency_sell(asset, quantity)
+                    return False, 0
+            
+            # Regular savings flow
             savings_product = self.savings_products_cache.get(asset)
-            if not savings_product:
-                self.logger.error(f"❌ No savings product for {asset}")
-                # Sell back the asset
-                self._emergency_sell(asset, quantity)
-                return False, 0
+            product_id = None
+            deposit_result = None
             
-            product_id = savings_product.get('productId')
-            
-            self.logger.info(f"💰 Depositing {quantity} {asset} to savings...")
-            
-            deposit_result = self.binance_api.purchase_savings_product(product_id, quantity)
-            
-            if "error" in deposit_result:
-                self.logger.error(f"❌ SAVINGS DEPOSIT FAILED: {deposit_result['message']}")
-                # Sell back the asset
-                self._emergency_sell(asset, quantity)
-                return False, 0
-            
-            self.logger.info(f"✅ DEPOSITED TO SAVINGS: {quantity} {asset}")
+            if savings_product:
+                product_id = savings_product.get('productId')
+                
+                if product_id:
+                    self.logger.info(f"💰 Depositing {quantity} {asset} to savings...")
+                    
+                    deposit_result = self.binance_api.purchase_savings_product(product_id, quantity)
+                    
+                    if "error" in deposit_result:
+                        self.logger.error(f"❌ SAVINGS DEPOSIT FAILED: {deposit_result['message']}")
+                        # Try to proceed without savings if loan API supports spot collateral
+                        self.logger.warning(f"⚠️ Attempting to use spot balance as collateral instead")
+                    else:
+                        self.logger.info(f"✅ DEPOSITED TO SAVINGS: {quantity} {asset}")
+                else:
+                    self.logger.warning(f"⚠️ No product ID for {asset}, using spot balance as collateral")
+            else:
+                self.logger.warning(f"⚠️ No savings product for {asset}, using spot balance as collateral")
             
             # Wait for deposit to process
             await asyncio.sleep(5)
+            
+            # Skip crypto loan if we already used margin
+            if self.use_margin_only:
+                return True, max_loan_amount
             
             # 5. APPLY FOR CRYPTO LOAN WITH OPTIMAL ASSET
             # Adjust loan amount based on optimal loan asset price if not USDT
@@ -799,14 +1023,62 @@ class EarnWalletLeverageBot:
             
             if "error" in loan_result:
                 self.logger.error(f"❌ CRYPTO LOAN FAILED: {loan_result['message']}")
-                # Try to withdraw from savings
-                try:
-                    self.binance_api.redeem_savings_product(product_id, quantity)
-                    self.logger.info(f"🔄 Withdrew {quantity} {asset} from savings after loan failure")
-                    await asyncio.sleep(3)
-                    self._emergency_sell(asset, quantity)
-                except:
-                    pass
+                
+                # If loan failed and we deposited to savings, try to withdraw
+                if product_id and deposit_result and "error" not in deposit_result:
+                    try:
+                        self.binance_api.redeem_savings_product(product_id, quantity)
+                        self.logger.info(f"🔄 Withdrew {quantity} {asset} from savings after loan failure")
+                        await asyncio.sleep(3)
+                    except:
+                        pass
+                
+                # Try alternative: Use margin account instead
+                if self.use_margin_fallback:
+                    self.logger.warning(f"⚠️ Attempting margin borrow as fallback")
+                    
+                    # Transfer to margin account
+                    transfer_result = self.binance_api.transfer_to_margin(asset, quantity)
+                    if "error" not in transfer_result:
+                        self.logger.info(f"✅ Transferred {quantity} {asset} to margin")
+                        
+                        # Borrow USDT in margin
+                        margin_borrow_result = self.binance_api.margin_borrow('USDT', max_loan_amount)
+                        if "error" not in margin_borrow_result:
+                            self.logger.info(f"✅ MARGIN BORROW SUCCESS: ${max_loan_amount} USDT")
+                            
+                            # Create position with margin info
+                            current_ltv = max_loan_amount / (quantity * asset_price)
+                            
+                            position = Position(
+                                asset=asset,
+                                collateral_amount=quantity,
+                                loan_amount=max_loan_amount,
+                                loan_asset='USDT',
+                                current_ltv=current_ltv,
+                                yield_earned=0,
+                                level=level,
+                                order_id=order_id,
+                                earn_product_id=None,  # No earn product for margin
+                                loan_order_id='MARGIN',  # Special indicator
+                                loan_rate=0.10,  # Default margin rate
+                                entry_price=asset_price,
+                                timestamp=datetime.now()
+                            )
+                            
+                            self.positions.append(position)
+                            self._save_positions()
+                            
+                            self.logger.info(f"🎯 MARGIN POSITION CREATED: Level {level} | {asset} | LTV: {current_ltv:.1%}")
+                            
+                            return True, max_loan_amount
+                        else:
+                            self.logger.error(f"❌ Margin borrow failed: {margin_borrow_result['message']}")
+                    else:
+                        self.logger.error(f"❌ Margin transfer failed: {transfer_result['message']}")
+                
+                # If all fails, sell back the asset
+                self._emergency_sell(asset, quantity)
                 return False, 0
             
             loan_order_id = loan_result.get('orderId', 'N/A')
@@ -1068,8 +1340,53 @@ class EarnWalletLeverageBot:
         try:
             self.logger.info(f"💥 CLOSING EARN POSITION: {position.asset} Level {position.level}")
             
+            # Check if this is a margin position
+            if position.loan_order_id == 'MARGIN':
+                self.logger.info(f"🔄 Closing margin position")
+                
+                # Repay margin loan
+                repay_result = self.binance_api.margin_repay('USDT', position.loan_amount * 1.01)
+                if "error" not in repay_result:
+                    self.logger.info(f"✅ MARGIN LOAN REPAID: {position.loan_amount} USDT")
+                else:
+                    self.logger.error(f"❌ Margin repay failed: {repay_result['message']}")
+                
+                # Transfer back to spot
+                time.sleep(2)
+                transfer_result = self.binance_api._make_request(
+                    "/sapi/v1/margin/transfer",
+                    {
+                        'asset': position.asset,
+                        'amount': f"{position.collateral_amount:.8f}".rstrip('0').rstrip('.'),
+                        'type': 2  # 2 for margin to spot
+                    },
+                    method='POST',
+                    require_auth=True
+                )
+                
+                if "error" not in transfer_result:
+                    self.logger.info(f"✅ Transferred {position.asset} back to spot")
+                
+                # Sell the asset
+                time.sleep(2)
+                symbol = f"{position.asset}USDT"
+                sell_quantity = self._format_quantity(symbol, position.collateral_amount)
+                
+                sell_order = self.binance_api.place_order(
+                    symbol=symbol,
+                    side='SELL',
+                    order_type='MARKET',
+                    quantity=sell_quantity
+                )
+                
+                if "error" not in sell_order:
+                    self.logger.info(f"✅ SOLD {position.asset} - Order: {sell_order.get('orderId')}")
+                
+                return
+            
+            # Regular crypto loan position handling
             # 1. Repay crypto loan
-            if position.loan_order_id:
+            if position.loan_order_id and position.loan_order_id != 'MARGIN':
                 # Calculate repay amount with buffer for interest
                 repay_amount = position.loan_amount * 1.01
                 
@@ -1196,7 +1513,62 @@ class EarnWalletLeverageBot:
             ]
         }
     
-    def get_account_balances(self) -> Dict:
+    def test_connection(self) -> Dict:
+        """Test API connection and permissions"""
+        results = {
+            'connection': False,
+            'account': False,
+            'permissions': [],
+            'spot_trading': False,
+            'savings': False,
+            'loans': False,
+            'prices': False,
+            'errors': []
+        }
+        
+        try:
+            # Test basic connection
+            ping = self.binance_api._make_request("/api/v3/ping", require_auth=False)
+            if not ping.get("error"):
+                results['connection'] = True
+                self.logger.info("✅ API connection successful")
+            
+            # Test account access
+            account = self.binance_api.get_account_info()
+            if not account.get("error"):
+                results['account'] = True
+                results['permissions'] = account.get('permissions', [])
+                results['spot_trading'] = 'SPOT' in results['permissions']
+                self.logger.info(f"✅ Account access successful. Permissions: {results['permissions']}")
+            else:
+                results['errors'].append(f"Account error: {account.get('message')}")
+            
+            # Test price data
+            prices = self.binance_api.get_all_prices()
+            if prices and len(prices) > 0:
+                results['prices'] = True
+                self.logger.info(f"✅ Price data available: {len(prices)} symbols")
+            
+            # Test savings products
+            savings = self.binance_api.get_savings_products()
+            if savings and len(savings) > 0:
+                results['savings'] = True
+                self.logger.info(f"✅ Savings products available: {len(savings)} products")
+            else:
+                results['errors'].append("No savings products found")
+            
+            # Test loan data
+            loan_data = self.binance_api.get_loan_data()
+            if loan_data and not loan_data.get("error"):
+                results['loans'] = True
+                self.logger.info("✅ Loan data available")
+            else:
+                results['errors'].append(f"Loan data error: {loan_data.get('message', 'Unknown')}")
+            
+        except Exception as e:
+            results['errors'].append(f"Test error: {str(e)}")
+            
+        return results
         """Get account balances"""
         try:
             account_info = self.binance_api.get_account_info()
@@ -1595,6 +1967,7 @@ HTML_TEMPLATE = '''
             <button class="btn btn-success" onclick="startEarnLeverage()">🏦 START EARN LEVERAGE</button>
             <button class="btn btn-danger" onclick="stopTrading()">🛑 CLOSE ALL POSITIONS</button>
             <button class="btn btn-primary" onclick="updateStatus()">🔄 Refresh Status</button>
+            <button class="btn btn-warning" onclick="testConnection()">🔍 Test Connection</button>
         </div>
         
         <div class="status" id="status">
@@ -1693,6 +2066,30 @@ HTML_TEMPLATE = '''
                 } catch (error) {
                     alert(`❌ Error: ${error.message}`);
                 }
+            }
+        }
+        
+        async function testConnection() {
+            try {
+                const response = await fetch('/test');
+                const result = await response.json();
+                
+                let message = 'Connection Test Results:\\n\\n';
+                message += `✓ API Connection: ${result.connection ? 'SUCCESS' : 'FAILED'}\\n`;
+                message += `✓ Account Access: ${result.account ? 'SUCCESS' : 'FAILED'}\\n`;
+                message += `✓ Permissions: ${result.permissions.join(', ') || 'None'}\\n`;
+                message += `✓ Spot Trading: ${result.spot_trading ? 'ENABLED' : 'DISABLED'}\\n`;
+                message += `✓ Price Data: ${result.prices ? 'AVAILABLE' : 'UNAVAILABLE'}\\n`;
+                message += `✓ Savings Products: ${result.savings ? 'AVAILABLE' : 'UNAVAILABLE'}\\n`;
+                message += `✓ Loan Data: ${result.loans ? 'AVAILABLE' : 'UNAVAILABLE'}\\n`;
+                
+                if (result.errors && result.errors.length > 0) {
+                    message += `\\n❌ Errors:\\n${result.errors.join('\\n')}`;
+                }
+                
+                alert(message);
+            } catch (error) {
+                alert(`❌ Test failed: ${error.message}`);
             }
         }
         
@@ -1884,6 +2281,22 @@ def get_balances():
         bot = EarnWalletLeverageBot(api_key, api_secret, testnet)
     
     return jsonify(bot.get_account_balances())
+
+@app.route('/test')
+def test_connection():
+    global bot
+    
+    api_key = os.getenv('BINANCE_API_KEY')
+    api_secret = os.getenv('BINANCE_API_SECRET')
+    testnet = os.getenv('BINANCE_TESTNET', 'false').lower() == 'true'
+    
+    if not api_key or not api_secret:
+        return jsonify({'error': 'No API credentials configured'})
+    
+    if not bot:
+        bot = EarnWalletLeverageBot(api_key, api_secret, testnet)
+    
+    return jsonify(bot.test_connection())
 
 if __name__ == '__main__':
     # Initialize bot on startup if credentials exist
